@@ -84,6 +84,8 @@ export function AIConfigurationModal({
       setMessages(currentSavedConfig.messages)
     } else if (currentSavedConfig.prompt) {
       setMessages([{ role: 'user', content: currentSavedConfig.prompt }])
+    } else {
+      setMessages([{ role: 'user', content: '' }])
     }
 
     if (currentSavedConfig.model !== undefined && currentSavedConfig.model !== null) {
@@ -106,8 +108,12 @@ export function AIConfigurationModal({
       setThinkingLevel(currentSavedConfig.thinkingLevel || '')
     }
 
+    setShowSaveTemplate(false)
+    setTemplateName('')
+    setShowTemplateManager(false)
+    setEditingTemplateId(null)
     setHasUnsavedChanges(false)
-  }, [open, columnConfig?.id, configString]) // Use configString to detect nested changes
+  }, [open, columnConfig?.id, configString]) // Use configString to detect nested changes; do NOT depend on columnConfig reference alone
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [isRunning, setIsRunning] = useState(false)
@@ -177,34 +183,6 @@ export function AIConfigurationModal({
 
   // Detect if the selected model supports thinking mode
   const supportsThinking = selectedModel.startsWith('gemini-3.1-pro')
-
-  // Load saved config when modal opens or columnConfig changes
-  useEffect(() => {
-    if (open && columnConfig) {
-      const config = (columnConfig as any).config || {}
-      
-      // Backward compatibility: Convert old prompt string to messages array
-      if (config.messages && Array.isArray(config.messages)) {
-        setMessages(config.messages)
-      } else if (config.prompt) {
-        // Old format: single prompt string
-        setMessages([{ role: 'user', content: config.prompt }])
-      } else {
-        setMessages([{ role: 'user', content: '' }])
-      }
-      
-      setSelectedModel(config.model || 'gemini-3-flash-preview')
-      setTemperature(config.temperature !== undefined ? config.temperature : 0.0)
-      setUseWebSearch(config.useWebSearch || false)
-      setSystemInstruction(config.systemInstruction || '')
-      setThinkingLevel(config.thinkingLevel || '')
-      setShowSaveTemplate(false)
-      setTemplateName('')
-      setShowTemplateManager(false)
-      setEditingTemplateId(null)
-      setHasUnsavedChanges(false)
-    }
-  }, [open, columnConfig])
 
   // Load templates when modal opens
   useEffect(() => {
@@ -424,15 +402,24 @@ export function AIConfigurationModal({
   }
 
   const handleRun = async () => {
-    // Check if there's at least one message with content
     const hasContent = messages.some(m => m.content.trim())
     if (!hasContent) {
-      alert('Please enter at least one message and save the configuration first')
+      alert('Please enter at least one message')
       return
     }
 
     setIsRunning(true)
     try {
+      // Persist latest UI state first so enrichment uses the current prompt/settings
+      await onSave({
+        messages,
+        model: selectedModel,
+        temperature,
+        useWebSearch,
+        systemInstruction,
+        ...(thinkingLevel ? { thinkingLevel } : {}),
+      })
+      setHasUnsavedChanges(false)
       await onRun(rowLimit, excludeProcessed)
       onOpenChange(false) // Close modal after starting run
     } catch (error) {
@@ -458,7 +445,7 @@ export function AIConfigurationModal({
             AI Column Configuration: {columnConfig.header}
           </DialogTitle>
           <DialogDescription>
-            Configure the AI prompt and settings for this column. Save your configuration, then run it when ready.
+            Configure the AI prompt and settings for this column. Run Column saves your changes automatically, then starts enrichment.
           </DialogDescription>
         </DialogHeader>
 

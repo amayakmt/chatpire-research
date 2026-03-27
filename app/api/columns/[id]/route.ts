@@ -13,6 +13,62 @@ import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 
+/**
+ * Remove column values from leads.data when RPC is missing or fails (e.g. older Supabase projects).
+ * Tries UUID key, display name, and normalized_name keys.
+ */
+async function stripColumnFromLeadsData(
+  boardId: string,
+  columnUuid: string,
+  columnName: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const keysToRemove = new Set<string>()
+  keysToRemove.add(columnUuid)
+  if (columnName?.trim()) {
+    keysToRemove.add(columnName.trim())
+    keysToRemove.add(columnName.trim().toLowerCase().replace(/\s+/g, '_'))
+  }
+
+  const { data: leads, error: fetchError } = await supabaseAdmin
+    .from('leads')
+    .select('id, data')
+    .eq('board_id', boardId)
+
+  if (fetchError) {
+    return { ok: false, message: fetchError.message }
+  }
+
+  if (!leads?.length) {
+    return { ok: true }
+  }
+
+  for (const lead of leads) {
+    const d = lead.data as Record<string, unknown> | null
+    if (!d || typeof d !== 'object') continue
+
+    const next: Record<string, unknown> = { ...d }
+    let touched = false
+    for (const k of keysToRemove) {
+      if (Object.prototype.hasOwnProperty.call(next, k)) {
+        delete next[k]
+        touched = true
+      }
+    }
+    if (!touched) continue
+
+    const { error: updateError } = await supabaseAdmin
+      .from('leads')
+      .update({ data: next })
+      .eq('id', lead.id)
+
+    if (updateError) {
+      return { ok: false, message: updateError.message }
+    }
+  }
+
+  return { ok: true }
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
@@ -271,11 +327,18 @@ export async function DELETE(
     })
 
     if (cleanupError) {
-      console.error('Failed to cleanup column data from leads:', cleanupError)
-      return NextResponse.json(
-        { message: 'Failed to remove column data from leads. Column was not deleted.' },
-        { status: 500 }
+      console.warn(
+        'delete_board_column_by_uuid RPC failed; falling back to app-side JSONB cleanup:',
+        cleanupError
       )
+      const fallback = await stripColumnFromLeadsData(column.board_id, column.id, column.name)
+      if (!fallback.ok) {
+        console.error('Fallback JSONB cleanup failed:', fallback.message)
+        return NextResponse.json(
+          { message: 'Failed to remove column data from leads. Column was not deleted.' },
+          { status: 500 }
+        )
+      }
     }
 
     // Step 2: Only delete from board_columns after data cleanup succeeds.
