@@ -14,6 +14,8 @@ import { Sparkles, ChevronDown, ChevronUp, X, Play, Save, FileText, FolderOpen, 
 import { AlertDialog } from '@/components/ui/alert-dialog'
 import { ModelSelect } from '@/components/model-select'
 import { MessageEditor, Message } from '@/components/message-editor'
+import { ensureMessageIds, stripMessageIdsForSave } from '@/lib/messageIds'
+import { isDemoMode, DEMO_MODEL_ID, DEMO_MAX_ROWS } from '@/lib/demoMode'
 
 interface AIConfigurationModalProps {
   open: boolean
@@ -22,7 +24,7 @@ interface AIConfigurationModalProps {
   columnConfig: ColumnConfig
   columnConfigs: ColumnConfig[]
   onSave: (config: {
-    messages: Message[]
+    messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
     model: string
     temperature: number
     useWebSearch: boolean
@@ -59,8 +61,10 @@ export function AIConfigurationModal({
     return [{ role: 'user', content: '' }]
   }
   
-  const [messages, setMessages] = useState<Message[]>(getInitialMessages())
-  const [selectedModel, setSelectedModel] = useState(savedConfig.model || 'gemini-3-flash-preview')
+  const [messages, setMessages] = useState<Message[]>(() => ensureMessageIds(getInitialMessages()))
+  const [selectedModel, setSelectedModel] = useState(
+    isDemoMode() ? DEMO_MODEL_ID : savedConfig.model || 'gemini-3-flash-preview'
+  )
   const [thinkingLevel, setThinkingLevel] = useState<'LOW' | 'MEDIUM' | 'HIGH' | ''>(
     savedConfig.thinkingLevel || ''
   )
@@ -81,11 +85,11 @@ export function AIConfigurationModal({
 
     // Update messages if they exist in saved config
     if (currentSavedConfig.messages && Array.isArray(currentSavedConfig.messages)) {
-      setMessages(currentSavedConfig.messages)
+      setMessages(ensureMessageIds(currentSavedConfig.messages))
     } else if (currentSavedConfig.prompt) {
-      setMessages([{ role: 'user', content: currentSavedConfig.prompt }])
+      setMessages(ensureMessageIds([{ role: 'user', content: currentSavedConfig.prompt }]))
     } else {
-      setMessages([{ role: 'user', content: '' }])
+      setMessages(ensureMessageIds([{ role: 'user', content: '' }]))
     }
 
     if (currentSavedConfig.model !== undefined && currentSavedConfig.model !== null) {
@@ -108,6 +112,12 @@ export function AIConfigurationModal({
       setThinkingLevel(currentSavedConfig.thinkingLevel || '')
     }
 
+    if (isDemoMode()) {
+      setSelectedModel(DEMO_MODEL_ID)
+      setThinkingLevel('')
+      setRowLimit(DEMO_MAX_ROWS)
+    }
+
     setShowSaveTemplate(false)
     setTemplateName('')
     setShowTemplateManager(false)
@@ -117,7 +127,7 @@ export function AIConfigurationModal({
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [isRunning, setIsRunning] = useState(false)
-  const [rowLimit, setRowLimit] = useState<number | 'all'>(1)
+  const [rowLimit, setRowLimit] = useState<number | 'all'>(isDemoMode() ? DEMO_MAX_ROWS : 1)
   const [excludeProcessed, setExcludeProcessed] = useState<boolean>(true)
   
   // Template-related state
@@ -133,7 +143,7 @@ export function AIConfigurationModal({
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
 
   // Model definitions — Feb 2026 documentation (5 supported models only)
-  const models = [
+  const allModels = [
     // ── Gemini 3.1 Series ───────────────────────────────────────
     {
       id: 'gemini-3.1-pro-preview',
@@ -181,6 +191,8 @@ export function AIConfigurationModal({
     },
   ]
 
+  const models = isDemoMode() ? allModels.filter((m) => m.id === DEMO_MODEL_ID) : allModels
+
   // Detect if the selected model supports thinking mode
   const supportsThinking = selectedModel.startsWith('gemini-3.1-pro')
 
@@ -218,17 +230,17 @@ export function AIConfigurationModal({
         const parsed = JSON.parse(template.content)
         if (Array.isArray(parsed) && parsed.every(m => m.role && typeof m.content === 'string')) {
           // It's a valid message array - load it directly
-          setMessages(parsed as Message[])
+          setMessages(ensureMessageIds(parsed as Message[]))
           console.log(`✅ Loaded template "${template.name}" with ${parsed.length} messages`)
         } else {
           // Parsed successfully but not a valid message array - treat parsed value as string content
           const content = typeof parsed === 'string' ? parsed : String(parsed)
-          setMessages([{ role: 'user', content }])
+          setMessages(ensureMessageIds([{ role: 'user', content }]))
           console.log(`⚠️ Template "${template.name}" parsed but not a message array, treating as single user message`)
         }
       } catch {
         // Not JSON, treat as plain string (backward compatibility with old templates)
-        setMessages([{ role: 'user', content: template.content }])
+        setMessages(ensureMessageIds([{ role: 'user', content: template.content }]))
         console.log(`📝 Loaded template "${template.name}" as plain string (backward compatibility)`)
       }
       setShowTemplateManager(false) // Close manager modal
@@ -324,7 +336,7 @@ export function AIConfigurationModal({
         body: JSON.stringify({
           name: templateName.trim(),
           // Save messages as JSON for future-proofing
-          content: JSON.stringify(messages),
+          content: JSON.stringify(stripMessageIdsForSave(messages)),
         }),
       })
 
@@ -384,7 +396,7 @@ export function AIConfigurationModal({
     setIsSaving(true)
     try {
       await onSave({
-        messages,
+        messages: stripMessageIdsForSave(messages),
         model: selectedModel,
         temperature,
         useWebSearch,
@@ -412,7 +424,7 @@ export function AIConfigurationModal({
     try {
       // Persist latest UI state first so enrichment uses the current prompt/settings
       await onSave({
-        messages,
+        messages: stripMessageIdsForSave(messages),
         model: selectedModel,
         temperature,
         useWebSearch,
@@ -420,7 +432,7 @@ export function AIConfigurationModal({
         ...(thinkingLevel ? { thinkingLevel } : {}),
       })
       setHasUnsavedChanges(false)
-      await onRun(rowLimit, excludeProcessed)
+      await onRun(isDemoMode() ? DEMO_MAX_ROWS : rowLimit, excludeProcessed)
       onOpenChange(false) // Close modal after starting run
     } catch (error) {
       console.error('Error running enrichment:', error)
@@ -453,6 +465,12 @@ export function AIConfigurationModal({
           {/* Model Selection */}
           <div className="space-y-2">
             <Label htmlFor="model">Model</Label>
+            {isDemoMode() && (
+              <p className="text-xs rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-foreground">
+                <span className="font-medium">Demo deployment:</span> only Gemini 2.5 Flash Lite is available.
+                Other models are disabled on purpose.
+              </p>
+            )}
             <ModelSelect
               value={selectedModel}
               onChange={(m) => {
@@ -464,6 +482,7 @@ export function AIConfigurationModal({
                 setHasUnsavedChanges(true)
               }}
               options={models}
+              disabled={isDemoMode()}
             />
           </div>
 
@@ -640,22 +659,34 @@ export function AIConfigurationModal({
           <div className="space-y-3 border-t pt-4">
             <Label>Run Options</Label>
             <div className="space-y-3">
-              <div className="flex items-center gap-2">
-                <select
-                  value={rowLimit === 'all' ? 'all' : rowLimit}
-                  onChange={(e) => setRowLimit(e.target.value === 'all' ? 'all' : parseInt(e.target.value, 10))}
-                  className="px-3 py-2 border rounded-md bg-background"
-                >
-                  <option value={1}>1 row</option>
-                  <option value={10}>10 rows</option>
-                  <option value={50}>50 rows</option>
-                  <option value={100}>100 rows</option>
-                  <option value="all">All rows</option>
-                </select>
-                <div className="text-xs text-muted-foreground">
-                  Number of rows to process when running
+              {isDemoMode() ? (
+                <div className="space-y-2">
+                  <p className="text-xs rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-foreground">
+                    <span className="font-medium">Demo deployment:</span> runs are fixed at {DEMO_MAX_ROWS} rows.
+                    Larger batch sizes are not available in this environment.
+                  </p>
+                  <div className="text-xs text-muted-foreground">
+                    Rows to process: {DEMO_MAX_ROWS}
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <select
+                    value={rowLimit === 'all' ? 'all' : rowLimit}
+                    onChange={(e) => setRowLimit(e.target.value === 'all' ? 'all' : parseInt(e.target.value, 10))}
+                    className="px-3 py-2 border rounded-md bg-background"
+                  >
+                    <option value={1}>1 row</option>
+                    <option value={10}>10 rows</option>
+                    <option value={50}>50 rows</option>
+                    <option value={100}>100 rows</option>
+                    <option value="all">All rows</option>
+                  </select>
+                  <div className="text-xs text-muted-foreground">
+                    Number of rows to process when running
+                  </div>
+                </div>
+              )}
               <div className="flex items-center justify-between">
                 <div>
                   <Label htmlFor="excludeProcessed" className="text-sm font-normal cursor-pointer">

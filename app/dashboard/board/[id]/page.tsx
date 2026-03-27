@@ -36,6 +36,7 @@ import { useColumnManager } from '@/hooks/useColumnManager'
 import { Toast } from '@/components/ui/toast'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
 import { Lead, Board, ColumnConfig } from '@/lib/types'
+import { isDemoMode, DEMO_MAX_ROWS, DEMO_MODEL_ID } from '@/lib/demoMode'
 import { convertBoardToCSV } from '@/lib/csvHelpers'
 import { Upload, ArrowLeft, MoreVertical, Trash2, ArrowUpDown, ArrowUp, ArrowDown, Palette, Sparkles, Plus, Type, Link2, Mail, Building2, User, Calendar, RefreshCw, Download, Pencil } from 'lucide-react'
 import { Loader } from '@/components/ui/loader'
@@ -1304,7 +1305,11 @@ export default function BoardPage({ params }: BoardPageProps) {
       throw new Error('No column selected or column ID not found')
     }
 
-    await handleSaveAIConfig(columnId, config) // columnId is UUID from board_columns.id
+    const configToSave = isDemoMode()
+      ? { ...config, model: DEMO_MODEL_ID, thinkingLevel: undefined }
+      : config
+
+    await handleSaveAIConfig(columnId, configToSave) // columnId is UUID from board_columns.id
     
     // Don't update selectedAIColumn here - let the useEffect sync with board data after refresh
     // This ensures we get the actual saved data from the database, not optimistic updates
@@ -1315,6 +1320,8 @@ export default function BoardPage({ params }: BoardPageProps) {
     if (!selectedDropContactColumn) {
       throw new Error('No DropContact column selected')
     }
+
+    const effectiveRowLimit = isDemoMode() ? DEMO_MAX_ROWS : rowLimit
 
     // columnId (UUID from board_columns.id) — sent to the /api/enrich/dropcontact POST
     // body so the server knows which column to write results into.
@@ -1377,7 +1384,7 @@ export default function BoardPage({ params }: BoardPageProps) {
 
     if (excludeProcessed) {
       const pendingRows = sortedRows.filter(isPendingRow)
-      const limit = typeof rowLimit === 'number' ? rowLimit : pendingRows.length
+      const limit = typeof effectiveRowLimit === 'number' ? effectiveRowLimit : pendingRows.length
       const rowsToProcess = pendingRows.slice(0, limit)
       targetRowIds = rowsToProcess.map((row) => row.original.id)
 
@@ -1385,7 +1392,7 @@ export default function BoardPage({ params }: BoardPageProps) {
         throw new Error('No pending rows found in the current view.')
       }
     } else {
-      const limit = typeof rowLimit === 'number' ? rowLimit : sortedRows.length
+      const limit = typeof effectiveRowLimit === 'number' ? effectiveRowLimit : sortedRows.length
       const rowsToProcess = sortedRows.slice(0, limit)
       targetRowIds = rowsToProcess.map((row) => row.original.id)
 
@@ -1619,6 +1626,8 @@ export default function BoardPage({ params }: BoardPageProps) {
       throw new Error('No column selected')
     }
 
+    const effectiveRowLimit = isDemoMode() ? DEMO_MAX_ROWS : rowLimit
+
     // Prevent multiple simultaneous runs
     if (isRunningRef.current) {
       throw new Error('Enrichment is already running. Please wait for it to complete.')
@@ -1710,7 +1719,10 @@ export default function BoardPage({ params }: BoardPageProps) {
     if (excludeProcessed) {
       // Filter for pending rows from the current view
       const pendingRows = sortedRows.filter(isPendingRow)
-      totalRowsToProcess = typeof rowLimit === 'number' ? Math.min(rowLimit, pendingRows.length) : pendingRows.length
+      totalRowsToProcess =
+        typeof effectiveRowLimit === 'number'
+          ? Math.min(effectiveRowLimit, pendingRows.length)
+          : pendingRows.length
       allPendingRowIds = pendingRows.slice(0, totalRowsToProcess).map((row) => row.original.id)
       
       if (allPendingRowIds.length === 0) {
@@ -1721,7 +1733,8 @@ export default function BoardPage({ params }: BoardPageProps) {
       console.log(`📋 FRONTEND FILTER: Found ${pendingRows.length} pending rows in view, will process ${allPendingRowIds.length}`)
     } else {
       // Process all rows (or limited amount) without filtering
-      totalRowsToProcess = typeof rowLimit === 'number' ? rowLimit : sortedRows.length
+      totalRowsToProcess =
+        typeof effectiveRowLimit === 'number' ? effectiveRowLimit : sortedRows.length
       allPendingRowIds = sortedRows.slice(0, totalRowsToProcess).map((row) => row.original.id)
       
       if (allPendingRowIds.length === 0) {

@@ -19,9 +19,11 @@ interface ModelSelectProps {
   onChange: (value: string) => void
   options: ModelOption[]
   className?: string
+  /** When true, the control is non-interactive (e.g. demo mode with a single fixed model). */
+  disabled?: boolean
 }
 
-export function ModelSelect({ value, onChange, options, className }: ModelSelectProps) {
+export function ModelSelect({ value, onChange, options, className, disabled = false }: ModelSelectProps) {
   const [isOpen, setIsOpen] = useState(false)
   const selectRef = useRef<HTMLDivElement>(null)
 
@@ -31,6 +33,10 @@ export function ModelSelect({ value, onChange, options, className }: ModelSelect
 
   // Find selected option
   const selectedOption = options.find((opt) => opt.id === value)
+
+  useEffect(() => {
+    if (disabled) setIsOpen(false)
+  }, [disabled])
 
   // Handle click outside
   useEffect(() => {
@@ -65,6 +71,7 @@ export function ModelSelect({ value, onChange, options, className }: ModelSelect
   }, [isOpen])
 
   const handleSelect = (optionId: string) => {
+    if (disabled) return
     onChange(optionId)
     setIsOpen(false)
   }
@@ -74,7 +81,9 @@ export function ModelSelect({ value, onChange, options, className }: ModelSelect
       {/* Trigger Button */}
       <button
         type="button"
-        onClick={() => setIsOpen(!isOpen)}
+        disabled={disabled}
+        aria-disabled={disabled}
+        onClick={() => !disabled && setIsOpen(!isOpen)}
         className={cn(
           'w-full px-3 py-2 text-left',
           'bg-background border border-input rounded-lg',
@@ -82,7 +91,8 @@ export function ModelSelect({ value, onChange, options, className }: ModelSelect
           'focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500',
           'transition-all duration-200',
           'flex items-center justify-between',
-          'text-sm font-medium'
+          'text-sm font-medium',
+          disabled && 'opacity-70 cursor-not-allowed hover:border-input'
         )}
       >
         <div className="flex items-center gap-2 flex-1 min-w-0">
@@ -110,7 +120,7 @@ export function ModelSelect({ value, onChange, options, className }: ModelSelect
         <ChevronDown
           className={cn(
             'h-4 w-4 text-muted-foreground flex-shrink-0 ml-2 transition-transform duration-200',
-            isOpen && 'transform rotate-180'
+            !disabled && isOpen && 'transform rotate-180'
           )}
         />
       </button>

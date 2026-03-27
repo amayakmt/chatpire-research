@@ -8,6 +8,7 @@ import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { ColumnConfig } from '@/lib/types'
 import { Mail, Play } from 'lucide-react'
+import { isDemoMode, DEMO_MAX_ROWS } from '@/lib/demoMode'
 
 interface DropContactMappingModalProps {
   open: boolean
@@ -40,7 +41,7 @@ export function DropContactMappingModal({
   const [websiteColId, setWebsiteColId] = useState(savedMapping.websiteColId || '')
   const [isSaving, setIsSaving] = useState(false)
   const [isRunning, setIsRunning] = useState(false)
-  const [rowLimit, setRowLimit] = useState<number | 'all'>(1)
+  const [rowLimit, setRowLimit] = useState<number | 'all'>(isDemoMode() ? DEMO_MAX_ROWS : 1)
   const [excludeProcessed, setExcludeProcessed] = useState<boolean>(true)
 
   // Reset form when modal opens/closes or column changes
@@ -51,6 +52,7 @@ export function DropContactMappingModal({
       setLastNameColId(mapping.lastNameColId || '')
       setCompanyColId(mapping.companyColId || '')
       setWebsiteColId(mapping.websiteColId || '')
+      if (isDemoMode()) setRowLimit(DEMO_MAX_ROWS)
     }
   }, [open, columnConfig])
 
@@ -101,7 +103,7 @@ export function DropContactMappingModal({
       await handleSave()
       // Then run with the selected options
       if (onRun) {
-        await onRun(rowLimit, excludeProcessed)
+        await onRun(isDemoMode() ? DEMO_MAX_ROWS : rowLimit, excludeProcessed)
         onOpenChange(false) // Close modal after starting run
       }
     } catch (error) {
@@ -199,22 +201,32 @@ export function DropContactMappingModal({
             <div className="space-y-3 border-t pt-4">
               <Label>Run Options</Label>
               <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <select
-                    value={rowLimit === 'all' ? 'all' : rowLimit}
-                    onChange={(e) => setRowLimit(e.target.value === 'all' ? 'all' : parseInt(e.target.value, 10))}
-                    className="px-3 py-2 border rounded-md bg-background"
-                  >
-                    <option value={1}>1 row</option>
-                    <option value={10}>10 rows</option>
-                    <option value={50}>50 rows</option>
-                    <option value={100}>100 rows</option>
-                    <option value="all">All rows</option>
-                  </select>
-                  <div className="text-xs text-muted-foreground">
-                    Number of rows to process when running
+                {isDemoMode() ? (
+                  <div className="space-y-2">
+                    <p className="text-xs rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-foreground">
+                      <span className="font-medium">Demo deployment:</span> runs are fixed at {DEMO_MAX_ROWS}{' '}
+                      rows. Larger batch sizes are not available in this environment.
+                    </p>
+                    <div className="text-xs text-muted-foreground">Rows to process: {DEMO_MAX_ROWS}</div>
                   </div>
-                </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={rowLimit === 'all' ? 'all' : rowLimit}
+                      onChange={(e) => setRowLimit(e.target.value === 'all' ? 'all' : parseInt(e.target.value, 10))}
+                      className="px-3 py-2 border rounded-md bg-background"
+                    >
+                      <option value={1}>1 row</option>
+                      <option value={10}>10 rows</option>
+                      <option value={50}>50 rows</option>
+                      <option value={100}>100 rows</option>
+                      <option value="all">All rows</option>
+                    </select>
+                    <div className="text-xs text-muted-foreground">
+                      Number of rows to process when running
+                    </div>
+                  </div>
+                )}
                 <div className="flex items-center justify-between">
                   <div>
                     <Label htmlFor="excludeProcessed" className="text-sm font-normal cursor-pointer">

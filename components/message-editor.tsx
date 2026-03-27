@@ -4,11 +4,9 @@ import { useState, useRef, useEffect } from 'react'
 import { Textarea } from '@/components/ui/textarea'
 import { Button } from '@/components/ui/button'
 import { X, Plus } from 'lucide-react'
+import type { Message } from '@/lib/messageIds'
 
-export interface Message {
-  role: 'system' | 'user' | 'assistant'
-  content: string
-}
+export type { Message } from '@/lib/messageIds'
 
 interface MessageEditorProps {
   messages: Message[]
@@ -23,15 +21,17 @@ export function MessageEditor({
   availableColumns,
   onInsertVariable,
 }: MessageEditorProps) {
-  const [showVariableMenu, setShowVariableMenu] = useState<number | null>(null)
-  const [cursorPositions, setCursorPositions] = useState<Record<number, number>>({})
-  const menuRefs = useRef<Record<number, HTMLDivElement | null>>({})
-  const textareaRefs = useRef<Record<number, HTMLTextAreaElement | null>>({})
+  const [showVariableMenu, setShowVariableMenu] = useState<string | null>(null)
+  const [cursorPositions, setCursorPositions] = useState<Record<string, number>>({})
+  const menuRefs = useRef<Record<string, HTMLDivElement | null>>({})
+  const textareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({})
 
-  // Auto-grow textareas
+  // Auto-grow textareas (by stable message id — avoids remount/focus loss)
   useEffect(() => {
-    messages.forEach((_, index) => {
-      const textarea = textareaRefs.current[index]
+    messages.forEach((m) => {
+      const id = m.id
+      if (!id) return
+      const textarea = textareaRefs.current[id]
       if (textarea) {
         textarea.style.height = 'auto'
         textarea.style.height = `${Math.max(100, textarea.scrollHeight)}px`
@@ -53,47 +53,52 @@ export function MessageEditor({
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [showVariableMenu])
 
-  const handleMessageChange = (index: number, content: string) => {
-    const updated = [...messages]
-    updated[index] = { ...updated[index], content }
+  const handleMessageChange = (messageId: string, content: string) => {
+    const updated = messages.map((m) =>
+      m.id === messageId ? { ...m, content } : m
+    )
     onChange(updated)
   }
 
-  const handleRoleChange = (index: number, role: 'system' | 'user' | 'assistant') => {
-    const updated = [...messages]
-    updated[index] = { ...updated[index], role }
+  const handleRoleChange = (messageId: string, role: 'system' | 'user' | 'assistant') => {
+    const updated = messages.map((m) => (m.id === messageId ? { ...m, role } : m))
     onChange(updated)
   }
 
-  const handleDelete = (index: number) => {
+  const handleDelete = (messageId: string) => {
     if (messages.length === 1) {
       // Don't allow deleting the last message
       return
     }
-    const updated = messages.filter((_, i) => i !== index)
+    const updated = messages.filter((m) => m.id !== messageId)
     onChange(updated)
   }
 
   const handleAddMessage = () => {
     const lastRole = messages[messages.length - 1]?.role || 'user'
     // Alternate between user and assistant, or add system if last was assistant
-    const newRole: 'system' | 'user' | 'assistant' = 
+    const newRole: 'system' | 'user' | 'assistant' =
       lastRole === 'user' ? 'assistant' : 'user'
-    
-    onChange([...messages, { role: newRole, content: '' }])
+
+    onChange([
+      ...messages,
+      { id: crypto.randomUUID(), role: newRole, content: '' },
+    ])
   }
 
-  const insertVariable = (index: number, variable: string) => {
-    const textarea = textareaRefs.current[index]
+  const insertVariable = (messageId: string, variable: string) => {
+    const textarea = textareaRefs.current[messageId]
     if (!textarea) return
 
-    const cursorPos = cursorPositions[index] || textarea.selectionStart
-    const text = messages[index].content
+    const cursorPos = cursorPositions[messageId] || textarea.selectionStart
+    const msg = messages.find((m) => m.id === messageId)
+    if (!msg) return
+    const text = msg.content
     const newText = text.slice(0, cursorPos) + `{{${variable}}}` + text.slice(cursorPos)
     
-    handleMessageChange(index, newText)
+    handleMessageChange(messageId, newText)
     setShowVariableMenu(null)
-    
+
     // Restore cursor position
     setTimeout(() => {
       textarea.focus()
@@ -126,15 +131,21 @@ export function MessageEditor({
 
   return (
     <div className="space-y-4">
-      {messages.map((message, index) => (
-        <div key={index} className="border border-border/60 rounded-xl p-4 space-y-3 bg-card">
+      {messages.map((message) => {
+        const mid = message.id
+        if (!mid) {
+          console.warn('MessageEditor: message missing id — parent should call ensureMessageIds')
+          return null
+        }
+        return (
+        <div key={mid} className="border border-border/60 rounded-xl p-4 space-y-3 bg-card">
           {/* Toolbar Header */}
           <div className="flex items-center justify-between mb-2">
             {/* Left side: Role Select */}
             <div className="flex items-center gap-2">
               <select
                 value={message.role}
-                onChange={(e) => handleRoleChange(index, e.target.value as 'system' | 'user' | 'assistant')}
+                onChange={(e) => handleRoleChange(mid, e.target.value as 'system' | 'user' | 'assistant')}
                 className={`px-3 py-1 text-xs font-semibold rounded-lg border ${getRoleBadgeClass(message.role)} focus:outline-none focus:ring-2 focus:ring-offset-1 bg-transparent`}
               >
                 <option value="system">System</option>
@@ -142,16 +153,16 @@ export function MessageEditor({
                 <option value="assistant">Assistant</option>
               </select>
             </div>
-            
+
             {/* Right side: Show Variables button and Delete button */}
             <div className="flex items-center gap-2">
               {availableColumns.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => setShowVariableMenu(showVariableMenu === index ? null : index)}
+                  onClick={() => setShowVariableMenu(showVariableMenu === mid ? null : mid)}
                   className="text-xs text-muted-foreground hover:text-foreground px-2 py-1 rounded-lg hover:bg-muted transition-colors"
                 >
-                  {showVariableMenu === index ? 'Hide' : 'Show'} Variables
+                  {showVariableMenu === mid ? 'Hide' : 'Show'} Variables
                 </button>
               )}
               {messages.length > 1 && (
@@ -159,7 +170,7 @@ export function MessageEditor({
                   type="button"
                   variant="ghost"
                   size="sm"
-                  onClick={() => handleDelete(index)}
+                  onClick={() => handleDelete(mid)}
                   className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
                 >
                   <X className="h-4 w-4" />
@@ -172,28 +183,28 @@ export function MessageEditor({
           <div className="relative">
             <Textarea
               ref={(el) => {
-                textareaRefs.current[index] = el
+                textareaRefs.current[mid] = el
               }}
               value={message.content}
               onChange={(e) => {
                 const textarea = e.target as HTMLTextAreaElement
-                setCursorPositions({ ...cursorPositions, [index]: textarea.selectionStart })
-                handleMessageChange(index, e.target.value)
+                setCursorPositions((prev) => ({ ...prev, [mid]: textarea.selectionStart }))
+                handleMessageChange(mid, e.target.value)
               }}
               onFocus={(e) => {
                 const textarea = e.target as HTMLTextAreaElement
-                setCursorPositions({ ...cursorPositions, [index]: textarea.selectionStart })
+                setCursorPositions((prev) => ({ ...prev, [mid]: textarea.selectionStart }))
               }}
               placeholder={`Enter ${getRoleLabel(message.role).toLowerCase()} message. Use {{variableName}} to reference columns...`}
               className="min-h-[100px] font-mono text-sm resize-none w-full"
               style={{ height: 'auto' }}
             />
-            
+
             {/* Variable Menu Dropdown */}
-            {showVariableMenu === index && availableColumns.length > 0 && (
+            {showVariableMenu === mid && availableColumns.length > 0 && (
               <div
                 ref={(el) => {
-                  menuRefs.current[index] = el
+                  menuRefs.current[mid] = el
                 }}
                 className="absolute z-50 mt-1 w-64 max-h-48 overflow-y-auto bg-popover border border-border rounded-xl shadow-lg p-1"
                 style={{ top: '100%', right: 0 }}
@@ -203,7 +214,7 @@ export function MessageEditor({
                   <button
                     key={col}
                     type="button"
-                    onClick={() => insertVariable(index, col)}
+                    onClick={() => insertVariable(mid, col)}
                     className="w-full text-left px-2.5 py-2 text-sm hover:bg-accent rounded-lg flex items-center justify-between transition-colors"
                   >
                     <span>{col}</span>
@@ -214,7 +225,8 @@ export function MessageEditor({
             )}
           </div>
         </div>
-      ))}
+        )
+      })}
 
       {/* Footer - Add Message Button */}
       <div className="flex justify-center">

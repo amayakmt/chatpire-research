@@ -5,6 +5,7 @@ import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 import { extractTextFromAny } from '../lib/extractText'
 import { replaceVariables, extractVariables } from '../lib/buildMessages'
 import { resolveModel, DEFAULT_MODEL, type ThinkingLevel } from '../lib/geminiClient'
+import { isDemoMode, DEMO_MODEL_ID, DEMO_MAX_ROWS } from '@/lib/demoMode'
 
 // Thinking-mode budget map (mirrors geminiClient.ts)
 const THINKING_BUDGET_MAP: Record<ThinkingLevel, number> = {
@@ -674,6 +675,12 @@ export async function POST(request: NextRequest) {
       messages: messages, // Pass messages for future chat API support
     }
 
+    if (isDemoMode()) {
+      config.model = resolveModel(DEMO_MODEL_ID)
+      config.thinkingLevel = undefined
+      console.log('🎭 DEMO_MODE: Forcing model to Gemini 2.5 Flash Lite; thinking disabled')
+    }
+
     // Check for Gemini API key
     if (!process.env.GEMINI_API_KEY) {
       return NextResponse.json(
@@ -966,6 +973,11 @@ export async function POST(request: NextRequest) {
         { message: 'No rows to process. All selected rows already have data.' },
         { status: 200 }
       )
+    }
+
+    if (isDemoMode() && leadsToProcess.length > DEMO_MAX_ROWS) {
+      leadsToProcess = leadsToProcess.slice(0, DEMO_MAX_ROWS)
+      console.log(`🎭 DEMO_MODE: Capped rows to ${DEMO_MAX_ROWS}`)
     }
     
     console.log(`🚀 Processing exactly ${leadsToProcess.length} leads (VIEW-AWARE: ${rowIds ? `${rowIds.length} specific rows` : 'limit-based'}, EXCLUDE_PROCESSED: ${excludeProcessed}) with concurrency limit of ${CONCURRENCY_LIMIT}`)

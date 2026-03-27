@@ -28,6 +28,8 @@ const Dialog = ({ open, onOpenChange, children }: DialogProps) => {
   const descriptionId = React.useId()
   const containerRef = React.useRef<HTMLDivElement>(null)
   const triggerRef = React.useRef<HTMLElement | null>(null)
+  /** Only focus first control when dialog opens — not when parent re-renders with a new onOpenChange. */
+  const wasOpenRef = React.useRef(false)
 
   // Capture the currently focused element before the dialog opens so focus
   // can be returned to it when the dialog closes.
@@ -50,17 +52,23 @@ const Dialog = ({ open, onOpenChange, children }: DialogProps) => {
     }
   }, [open])
 
-  // Focus trap and initial focus
+  // Focus trap; initial focus only on open transition (avoid stealing focus on every parent re-render)
   React.useEffect(() => {
-    if (!open || !containerRef.current) return
+    if (!open) {
+      wasOpenRef.current = false
+      return
+    }
+    if (!containerRef.current) return
 
     const container = containerRef.current
-    const focusableElements = Array.from(
-      container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTORS)
-    )
+    const justOpened = !wasOpenRef.current
+    wasOpenRef.current = true
 
-    if (focusableElements.length > 0) {
-      focusableElements[0].focus()
+    if (justOpened) {
+      const focusableElements = Array.from(
+        container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTORS)
+      )
+      focusableElements[0]?.focus()
     }
 
     const handleKeyDown = (e: KeyboardEvent) => {
