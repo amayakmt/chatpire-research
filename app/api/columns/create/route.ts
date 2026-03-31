@@ -70,18 +70,26 @@ export async function POST(request: NextRequest) {
         : 0
     }
 
-    // Prepare insert data
-    const insertData: any = {
+    // Prepare insert data (position mirrors order for persisted display order)
+    const baseConfig = typeof config === 'object' && config !== null ? config : {}
+    const insertData: {
+      board_id: string
+      name: string
+      type: string
+      order: number
+      position: number
+      config: Record<string, unknown>
+    } = {
       board_id: boardId,
       name: name.trim(),
       type,
       order: finalOrder,
-      config: config || {},
+      position: finalOrder,
+      config: { ...baseConfig },
     }
 
     // Add metadata if provided (store in config.metadata for now, or as separate field if DB supports it)
     if (metadata !== undefined) {
-      // Store metadata in config for now (can be moved to separate column later)
       insertData.config = {
         ...insertData.config,
         metadata: metadata,

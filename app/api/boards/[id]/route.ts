@@ -34,25 +34,50 @@ export async function GET(
       )
     }
 
-    // Fetch columns from board_columns table
-    const { data: columns, error: columnsError } = await supabaseAdmin
+    // Fetch columns from board_columns — sort by position (canonical), then order, then id
+    let columns: any[] | null = null
+    const { data: byPosition, error: posErr } = await supabaseAdmin
       .from('board_columns')
       .select('*')
       .eq('board_id', params.id)
-      .order('order', { ascending: true })
+      .order('position', { ascending: true, nullsFirst: false })
+      .order('id', { ascending: true })
 
-    if (columnsError) {
-      console.error('Columns fetch error:', columnsError)
-      // Don't fail the request if columns can't be fetched, just log it
-      console.warn('Continuing without columns data')
+    if (!posErr && byPosition) {
+      columns = byPosition
+    } else {
+      const { data: byOrder, error: orderErr } = await supabaseAdmin
+        .from('board_columns')
+        .select('*')
+        .eq('board_id', params.id)
+        .order('order', { ascending: true })
+        .order('id', { ascending: true })
+
+      if (orderErr) {
+        console.error('Columns fetch error:', orderErr)
+        console.warn('Continuing without columns data')
+      } else {
+        columns = byOrder
+      }
     }
+
+    const normalizedColumns = (columns || []).map((col) => ({
+      ...col,
+      order: col.position ?? col.order ?? 0,
+    }))
+
+    const isNewColumnSystem =
+      Array.isArray(normalizedColumns) &&
+      normalizedColumns.length > 0 &&
+      typeof (normalizedColumns[0] as { type?: unknown }).type === 'string'
 
     // Return board with columns
     return NextResponse.json({
       board: {
         ...board,
-        columns: columns || []
-      }
+        columns: normalizedColumns,
+        isNewColumnSystem,
+      },
     })
   } catch (error) {
     console.error('Error fetching board:', error)

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
+import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
@@ -28,17 +28,18 @@ import { CSVImporter } from '@/components/csv-importer'
 import { AIConfigurationModal } from '@/components/ai-configuration-modal'
 import { DropContactMappingModal } from '@/components/dropcontact-mapping-modal'
 import { CellDetailPanel } from '@/components/cell-detail-panel'
-import { DataRow } from '@/components/board/DataRow'
+import { DataRow, ROW_SELECT_COL_WIDTH } from '@/components/board/DataRow'
 import { BoardHeader } from '@/components/board/BoardHeader'
 import { ColumnHeader } from '@/components/board/ColumnHeader'
 import { useBoardData } from '@/hooks/useBoardData'
 import { useColumnManager } from '@/hooks/useColumnManager'
 import { Toast } from '@/components/ui/toast'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
+import { AlertDialog } from '@/components/ui/alert-dialog'
 import { Lead, Board, ColumnConfig } from '@/lib/types'
 import { isDemoMode, DEMO_MAX_ROWS, DEMO_MODEL_ID } from '@/lib/demoMode'
 import { convertBoardToCSV } from '@/lib/csvHelpers'
-import { Upload, ArrowLeft, MoreVertical, Trash2, ArrowUpDown, ArrowUp, ArrowDown, Palette, Sparkles, Plus, Type, Link2, Mail, Building2, User, Calendar, RefreshCw, Download, Pencil } from 'lucide-react'
+import { Upload, ArrowLeft, MoreVertical, Trash2, ArrowUpDown, ArrowUp, ArrowDown, Palette, Sparkles, Plus, Type, Link2, Mail, Building2, User, Calendar, RefreshCw, Download, Pencil, X } from 'lucide-react'
 import { Loader } from '@/components/ui/loader'
 import { DropdownMenu, DropdownMenuItem } from '@/components/ui/dropdown-menu'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
@@ -84,6 +85,52 @@ function isUrl(value: string): boolean {
   } catch {
     return false
   }
+}
+
+/** Fetches up to `maxRows` leads in DB order (matches /api/leads), chunked for the API 5000 cap. */
+async function fetchLeadsForEnrichmentRun(
+  boardId: string,
+  maxRows: number,
+  getHeaders: () => Record<string, string>
+): Promise<Lead[]> {
+  const API_MAX = 5000
+  const out: Lead[] = []
+  let start = 0
+  while (start < maxRows) {
+    const chunk = Math.min(API_MAX, maxRows - start)
+    const response = await fetch(
+      `/api/leads?board_id=${encodeURIComponent(boardId)}&start=${start}&limit=${chunk}`,
+      { headers: getHeaders() }
+    )
+    if (!response.ok) {
+      throw new Error('Failed to fetch leads for enrichment')
+    }
+    const data = await response.json()
+    const batch: Lead[] = data.leads || []
+    if (batch.length === 0) break
+    out.push(...batch)
+    if (batch.length < chunk) break
+    start += batch.length
+  }
+  return out
+}
+
+/** All lead IDs for the board in DB display order (GET /api/leads/ids). */
+async function fetchAllLeadIdsForBoard(
+  boardId: string,
+  getHeaders: () => Record<string, string>
+): Promise<string[]> {
+  const response = await fetch(
+    `/api/leads/ids?board_id=${encodeURIComponent(boardId)}`,
+    { headers: getHeaders() }
+  )
+  if (!response.ok) {
+    throw new Error('Failed to fetch lead IDs for this board')
+  }
+  const data = await response.json()
+  const ids = data.ids
+  if (!Array.isArray(ids)) return []
+  return ids.filter((id: unknown) => typeof id === 'string' && id.length > 0)
 }
 
 
@@ -191,6 +238,55 @@ function EditableCell({
   )
 }
 
+function SelectAllVisibleHeader({
+  getVisibleLeadIds,
+  selectedLeadIds,
+  setSelectedLeadIds,
+  viewportVersion,
+}: {
+  getVisibleLeadIds: () => string[]
+  selectedLeadIds: Set<string>
+  setSelectedLeadIds: React.Dispatch<React.SetStateAction<Set<string>>>
+  viewportVersion: number
+}) {
+  const visibleIds = useMemo(
+    () => getVisibleLeadIds(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- viewportVersion bumps on scroll to refresh visibility
+    [getVisibleLeadIds, viewportVersion]
+  )
+  const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedLeadIds.has(id))
+  const someSelected = visibleIds.some((id) => selectedLeadIds.has(id))
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.indeterminate = someSelected && !allSelected
+    }
+  }, [someSelected, allSelected])
+
+  return (
+    <input
+      ref={inputRef}
+      type="checkbox"
+      checked={allSelected}
+      onChange={() => {
+        setSelectedLeadIds((prev) => {
+          const next = new Set(prev)
+          if (allSelected) {
+            visibleIds.forEach((id) => next.delete(id))
+          } else {
+            visibleIds.forEach((id) => next.add(id))
+          }
+          return next
+        })
+      }}
+      className="h-3.5 w-3.5 rounded border-input accent-primary cursor-pointer"
+      title="Select all rows currently visible in the viewport"
+      aria-label="Select all visible rows"
+    />
+  )
+}
+
 
 export default function BoardPage({ params }: BoardPageProps) {
   const router = useRouter()
@@ -203,10 +299,7 @@ export default function BoardPage({ params }: BoardPageProps) {
     isLoading,
     error: boardError,
     totalRows,
-    viewStart,
-    viewLimit,
-    setViewStart,
-    setViewLimit,
+    setTotalRows,
     refetchLeads,
     refetchBoard,
   } = useBoardData({ boardId: params.id })
@@ -223,6 +316,7 @@ export default function BoardPage({ params }: BoardPageProps) {
     setHasInitialized,
     saveColumnConfig,
     saveColumnConfigDebounced,
+    persistColumnOrder,
     handleColumnRename,
     handleDeleteColumn,
     handleColumnColorChange,
@@ -285,11 +379,99 @@ export default function BoardPage({ params }: BoardPageProps) {
   const processingColumnNameRef = useRef<string | null>(null)
   const isRunningRef = useRef<boolean>(false)
 
+  const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(() => new Set())
+  const [deleteRowsDialogOpen, setDeleteRowsDialogOpen] = useState(false)
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<string[]>([])
+  const [rowContextMenu, setRowContextMenu] = useState<{ x: number; y: number; leadId: string } | null>(
+    null
+  )
+  const [viewportVersion, setViewportVersion] = useState(0)
+  const scrollBumpRaf = useRef<number | null>(null)
+
   const getAuthHeaders = (): Record<string, string> => {
     return {
       'Content-Type': 'application/json',
     }
   }
+
+  const pendingDeleteIdsRef = useRef<string[]>([])
+
+  const toggleLeadSelection = useCallback((id: string) => {
+    setSelectedLeadIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const handleRowContextMenu = useCallback((e: React.MouseEvent, lead: Lead) => {
+    e.preventDefault()
+    setRowContextMenu({ x: e.clientX, y: e.clientY, leadId: lead.id })
+  }, [])
+
+  const openDeleteRowsDialog = useCallback((ids: string[]) => {
+    if (ids.length === 0) return
+    pendingDeleteIdsRef.current = ids
+    setPendingDeleteIds(ids)
+    setDeleteRowsDialogOpen(true)
+  }, [])
+
+  const confirmBulkDelete = useCallback(async () => {
+    const ids = pendingDeleteIdsRef.current
+    if (ids.length === 0) {
+      setDeleteRowsDialogOpen(false)
+      return
+    }
+    const snapshotLeads = leads.slice()
+    const snapshotTotal = totalRows
+    setLeads((prev) => prev.filter((l) => !ids.includes(l.id)))
+    setTotalRows((t) => Math.max(0, t - ids.length))
+    try {
+      const res = await fetch('/api/leads/bulk-delete', {
+        method: 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ boardId: params.id, ids }),
+      })
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { message?: string }
+        throw new Error(j.message || 'Failed to delete rows')
+      }
+      setSelectedLeadIds((prev) => {
+        const next = new Set(prev)
+        ids.forEach((id) => next.delete(id))
+        return next
+      })
+      setProcessingLeads((prev) => {
+        const next = new Set(prev)
+        ids.forEach((id) => next.delete(id))
+        return next
+      })
+      processingLeadsRef.current = new Set(
+        [...processingLeadsRef.current].filter((id) => !ids.includes(id))
+      )
+      setDeleteRowsDialogOpen(false)
+      setPendingDeleteIds([])
+      pendingDeleteIdsRef.current = []
+      setRowContextMenu(null)
+    } catch (err) {
+      setLeads(snapshotLeads)
+      setTotalRows(snapshotTotal)
+      setToast({
+        message: err instanceof Error ? err.message : 'Failed to delete rows',
+        variant: 'destructive',
+      })
+      setDeleteRowsDialogOpen(false)
+    }
+  }, [leads, totalRows, params.id, setLeads, setTotalRows])
+
+  const handleTableScrollBump = useCallback(() => {
+    if (scrollBumpRaf.current != null) cancelAnimationFrame(scrollBumpRaf.current)
+    scrollBumpRaf.current = requestAnimationFrame(() => {
+      setViewportVersion((v) => v + 1)
+      scrollBumpRaf.current = null
+    })
+  }, [])
 
   // TODO: Consolidate 15+ useState calls into useReducer for better state cohesion.
   // Current state vars:
@@ -985,6 +1167,18 @@ export default function BoardPage({ params }: BoardPageProps) {
         } as ColumnDef<Lead>
       })
 
+      const rowSelectColumn: ColumnDef<Lead> = {
+        id: '__select',
+        header: () => null,
+        size: ROW_SELECT_COL_WIDTH,
+        minSize: ROW_SELECT_COL_WIDTH,
+        maxSize: ROW_SELECT_COL_WIDTH,
+        enableResizing: false,
+        enableSorting: false,
+        // Checkbox is rendered in DataRow (needs selection props + memo-friendly updates)
+        cell: () => null,
+      }
+
       // Add row index column
       const rowIndexColumn: ColumnDef<Lead> = {
         id: '__index',
@@ -1001,12 +1195,12 @@ export default function BoardPage({ params }: BoardPageProps) {
         },
       }
 
-      return [rowIndexColumn, ...dataColumns]
+      return [rowSelectColumn, rowIndexColumn, ...dataColumns]
     }
 
     // Fallback: generate from data (shouldn't happen if config exists)
     return []
-  }, [leads, columnConfigs, editingCell])
+  }, [leads, columnConfigs, editingCell, board])
 
   // Handle TanStack Table's internal column sizing changes.
   // Only updates the lightweight columnSizing state — no columnConfigs sync here.
@@ -1055,7 +1249,10 @@ export default function BoardPage({ params }: BoardPageProps) {
 
   // Sync column sizing from configs (initial load & external config changes)
   useEffect(() => {
-    const sizing: Record<string, number> = {}
+    const sizing: Record<string, number> = {
+      __select: ROW_SELECT_COL_WIDTH,
+      __index: 60,
+    }
     columnConfigs.forEach((config) => {
       sizing[config.id] = config.width
     })
@@ -1099,6 +1296,31 @@ export default function BoardPage({ params }: BoardPageProps) {
     overscan: 10,
   })
 
+  const getVisibleLeadIds = useCallback(() => {
+    return rowVirtualizer
+      .getVirtualItems()
+      .map((vi) => rows[vi.index]?.original?.id)
+      .filter((id): id is string => !!id)
+  }, [rowVirtualizer, rows])
+
+  useEffect(() => {
+    if (!rowContextMenu) return
+    const closeMouse = (e: MouseEvent) => {
+      if (e.button !== 0) return
+      setRowContextMenu(null)
+    }
+    const closeScroll = () => setRowContextMenu(null)
+    const t = window.setTimeout(() => {
+      document.addEventListener('mousedown', closeMouse)
+      document.addEventListener('scroll', closeScroll, true)
+    }, 0)
+    return () => {
+      window.clearTimeout(t)
+      document.removeEventListener('mousedown', closeMouse)
+      document.removeEventListener('scroll', closeScroll, true)
+    }
+  }, [rowContextMenu])
+
   // Handle column reorder
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event
@@ -1121,7 +1343,7 @@ export default function BoardPage({ params }: BoardPageProps) {
     }))
     
     setColumnConfigs(updatedConfigs)
-    saveColumnConfig(updatedConfigs)
+    void persistColumnOrder(updatedConfigs)
   }
 
 
@@ -1367,8 +1589,31 @@ export default function BoardPage({ params }: BoardPageProps) {
     processingColumnIdRef.current = columnUuid
     processingColumnNameRef.current = selectedDropContactColumn.header || columnUuid
 
-    // Get pending rows from current view
     const sortedRows = table.getRowModel().rows
+    const loadedCount = sortedRows.length
+    const needsWideFetch =
+      totalRows > loadedCount &&
+      (effectiveRowLimit === 'all' ||
+        (typeof effectiveRowLimit === 'number' && effectiveRowLimit > loadedCount))
+
+    let rowsForRun: { original: Lead }[]
+    try {
+      if (needsWideFetch) {
+        const fetchCap =
+          effectiveRowLimit === 'all'
+            ? totalRows
+            : Math.min(effectiveRowLimit, totalRows)
+        setToast({ message: `Loading ${fetchCap} row${fetchCap === 1 ? '' : 's'} for DropContact…` })
+        const wideLeads = await fetchLeadsForEnrichmentRun(params.id, fetchCap, getAuthHeaders)
+        rowsForRun = wideLeads.map((lead) => ({ original: lead }))
+      } else {
+        rowsForRun = sortedRows as { original: Lead }[]
+      }
+    } catch (e) {
+      setProcessingColumnId(null)
+      processingColumnIdRef.current = null
+      throw e
+    }
 
     // Client is "dumb" - uses UUID directly, no transformation
     const isPendingRow = (row: any): boolean => {
@@ -1383,23 +1628,27 @@ export default function BoardPage({ params }: BoardPageProps) {
     let targetRowIds: string[] = []
 
     if (excludeProcessed) {
-      const pendingRows = sortedRows.filter(isPendingRow)
+      const pendingRows = rowsForRun.filter(isPendingRow)
       const limit = typeof effectiveRowLimit === 'number' ? effectiveRowLimit : pendingRows.length
       const rowsToProcess = pendingRows.slice(0, limit)
       targetRowIds = rowsToProcess.map((row) => row.original.id)
 
       if (targetRowIds.length === 0) {
-        throw new Error('No pending rows found in the current view.')
+        throw new Error(
+          'No pending rows to process. Turn off "Exclude already processed" to re-run, or all rows already have data.'
+        )
       }
     } else {
-      const limit = typeof effectiveRowLimit === 'number' ? effectiveRowLimit : sortedRows.length
-      const rowsToProcess = sortedRows.slice(0, limit)
+      const limit = typeof effectiveRowLimit === 'number' ? effectiveRowLimit : rowsForRun.length
+      const rowsToProcess = rowsForRun.slice(0, limit)
       targetRowIds = rowsToProcess.map((row) => row.original.id)
 
       if (targetRowIds.length === 0) {
         throw new Error('No rows selected for processing')
       }
     }
+
+    const leadById = new Map(rowsForRun.map((r) => [r.original.id, r.original]))
 
     // Set up processing state
     const processingSet = new Set(targetRowIds)
@@ -1414,9 +1663,9 @@ export default function BoardPage({ params }: BoardPageProps) {
     // FRONTEND-DRIVEN: Process rows using frontend-calculated rowIds
     // Extract data for each row and call API
     const processPromises = targetRowIds.map(async (rowId) => {
-      const row = sortedRows.find((r) => r.original.id === rowId)
-      if (!row) {
-        console.warn(`Row ${rowId} not found in current view`)
+      const leadRow = leadById.get(rowId)
+      if (!leadRow) {
+        console.warn(`Row ${rowId} not found in enrichment row set`)
         return
       }
 
@@ -1427,10 +1676,10 @@ export default function BoardPage({ params }: BoardPageProps) {
       const websiteColKey = mapping.websiteColId ? mapping.websiteColId.toLowerCase().replace(/\s+/g, '_') : null
 
       // Try normalized key first, then exact match
-      const firstName = row.original.data?.[firstNameColKey] || row.original.data?.[mapping.firstNameColId] || ''
-      const lastName = row.original.data?.[lastNameColKey] || row.original.data?.[mapping.lastNameColId] || ''
-      const company = row.original.data?.[companyColKey] || row.original.data?.[mapping.companyColId] || ''
-      const website = websiteColKey ? (row.original.data?.[websiteColKey] || row.original.data?.[mapping.websiteColId] || '') : ''
+      const firstName = leadRow.data?.[firstNameColKey] || leadRow.data?.[mapping.firstNameColId] || ''
+      const lastName = leadRow.data?.[lastNameColKey] || leadRow.data?.[mapping.lastNameColId] || ''
+      const company = leadRow.data?.[companyColKey] || leadRow.data?.[mapping.companyColId] || ''
+      const website = websiteColKey ? (leadRow.data?.[websiteColKey] || leadRow.data?.[mapping.websiteColId] || '') : ''
 
       // Handle AI enrichment results (extract value if it's an object)
       const extractValue = (val: any): string => {
@@ -1675,74 +1924,127 @@ export default function BoardPage({ params }: BoardPageProps) {
     processingColumnIdRef.current = columnUuid
     processingColumnNameRef.current = selectedAIColumn.header || columnUuid
     isRunningRef.current = true
-    
 
-    // FRONTEND-DRIVEN: Calculate pending rows from the current view
-    // This ensures we process exactly what the user sees, respecting their current sort/filter
-    const sortedRows = table.getRowModel().rows
-    
-    // Helper function to check if a row is pending (empty/null/error)
-    // Client is "dumb" - uses UUID directly, no transformation
     const isPendingRow = (row: any): boolean => {
       const columnValue = row.original.data?.[columnUuid]
-      
-      // Case 1: Undefined, Null, or missing key
+
       if (columnValue === undefined || columnValue === null) return true
-      
-      // Case 2: Empty string
       if (columnValue === '') return true
-      
-      // Case 3: Empty object {}
       if (typeof columnValue === 'object' && Object.keys(columnValue).length === 0) return true
-      
-      // Case 4: Object with empty/failed value (e.g., { type: 'ai', value: '' })
       if (typeof columnValue === 'object' && 'value' in columnValue) {
         const value = columnValue.value
         return !value || value === '' || value === 'ERROR' || value === null || value === undefined
       }
-      
-      // Case 5: String that's empty or ERROR
       if (typeof columnValue === 'string') {
         return columnValue.trim() === '' || columnValue === 'ERROR'
       }
-      
-      // Case 6: Any other falsy value
       if (!columnValue) return true
-      
       return false
     }
-    
-    // Calculate total rows to process
+
     let totalRowsToProcess: number
     let allPendingRowIds: string[] = []
-    
-    if (excludeProcessed) {
-      // Filter for pending rows from the current view
-      const pendingRows = sortedRows.filter(isPendingRow)
-      totalRowsToProcess =
-        typeof effectiveRowLimit === 'number'
-          ? Math.min(effectiveRowLimit, pendingRows.length)
-          : pendingRows.length
-      allPendingRowIds = pendingRows.slice(0, totalRowsToProcess).map((row) => row.original.id)
-      
-      if (allPendingRowIds.length === 0) {
+
+    if (effectiveRowLimit === 'all') {
+      try {
+        setToast({ message: 'Loading all row IDs from database…' })
+        const dbIds = await fetchAllLeadIdsForBoard(params.id, getAuthHeaders)
+        const leadById = new Map(leads.map((l) => [l.id, l]))
+
+        const pendingForId = (id: string): boolean => {
+          const lead = leadById.get(id)
+          if (!lead) return true
+          return isPendingRow({ original: lead })
+        }
+
+        if (excludeProcessed) {
+          allPendingRowIds = dbIds.filter(pendingForId)
+          totalRowsToProcess = allPendingRowIds.length
+          if (allPendingRowIds.length === 0) {
+            isRunningRef.current = false
+            setProcessingColumnId(null)
+            processingColumnIdRef.current = null
+            throw new Error(
+              'No pending rows to process. Turn off "Exclude already processed" to re-run, or all rows already have data.'
+            )
+          }
+          console.log(
+            `📋 ALL ROWS (DB IDs): ${dbIds.length} total, ${allPendingRowIds.length} pending after filter`
+          )
+        } else {
+          allPendingRowIds = dbIds
+          totalRowsToProcess = dbIds.length
+          if (allPendingRowIds.length === 0) {
+            isRunningRef.current = false
+            setProcessingColumnId(null)
+            processingColumnIdRef.current = null
+            throw new Error('No rows on this board')
+          }
+          console.log(`📋 ALL ROWS (DB IDs): processing ${allPendingRowIds.length} rows`)
+        }
+      } catch (e) {
         isRunningRef.current = false
-        throw new Error('No pending rows found in the current view. All visible rows already have data.')
+        setProcessingColumnId(null)
+        processingColumnIdRef.current = null
+        throw e
       }
-      
-      console.log(`📋 FRONTEND FILTER: Found ${pendingRows.length} pending rows in view, will process ${allPendingRowIds.length}`)
     } else {
-      // Process all rows (or limited amount) without filtering
-      totalRowsToProcess =
-        typeof effectiveRowLimit === 'number' ? effectiveRowLimit : sortedRows.length
-      allPendingRowIds = sortedRows.slice(0, totalRowsToProcess).map((row) => row.original.id)
-      
-      if (allPendingRowIds.length === 0) {
+      const sortedRows = table.getRowModel().rows
+      const loadedCount = sortedRows.length
+      const needsWideFetch =
+        totalRows > loadedCount &&
+        typeof effectiveRowLimit === 'number' &&
+        effectiveRowLimit > loadedCount
+
+      let rowsForRun: { original: Lead }[]
+      try {
+        if (needsWideFetch) {
+          const fetchCap = Math.min(effectiveRowLimit, totalRows)
+          setToast({ message: `Loading ${fetchCap} row${fetchCap === 1 ? '' : 's'} for enrichment…` })
+          const wideLeads = await fetchLeadsForEnrichmentRun(params.id, fetchCap, getAuthHeaders)
+          rowsForRun = wideLeads.map((lead) => ({ original: lead }))
+        } else {
+          rowsForRun = sortedRows as { original: Lead }[]
+        }
+      } catch (e) {
         isRunningRef.current = false
-        throw new Error('No rows selected for processing')
+        setProcessingColumnId(null)
+        processingColumnIdRef.current = null
+        throw e
       }
-      
-      console.log(`📋 Processing ${allPendingRowIds.length} rows in current view order`)
+
+      if (excludeProcessed) {
+        const pendingRows = rowsForRun.filter(isPendingRow)
+        totalRowsToProcess = Math.min(effectiveRowLimit, pendingRows.length)
+        allPendingRowIds = pendingRows.slice(0, totalRowsToProcess).map((row) => row.original.id)
+
+        if (allPendingRowIds.length === 0) {
+          isRunningRef.current = false
+          setProcessingColumnId(null)
+          processingColumnIdRef.current = null
+          throw new Error(
+            'No pending rows to process. Turn off "Exclude already processed" to re-run, or all rows already have data.'
+          )
+        }
+
+        console.log(
+          `📋 FRONTEND FILTER: Found ${pendingRows.length} pending rows (${needsWideFetch ? 'board fetch' : 'table view'}), will process ${allPendingRowIds.length}`
+        )
+      } else {
+        totalRowsToProcess = effectiveRowLimit
+        allPendingRowIds = rowsForRun.slice(0, totalRowsToProcess).map((row) => row.original.id)
+
+        if (allPendingRowIds.length === 0) {
+          isRunningRef.current = false
+          setProcessingColumnId(null)
+          processingColumnIdRef.current = null
+          throw new Error('No rows selected for processing')
+        }
+
+        console.log(
+          `📋 Processing ${allPendingRowIds.length} rows (${needsWideFetch ? 'board order from API' : 'current table order'})`
+        )
+      }
     }
     
     // CLIENT-SIDE CHUNKING: Small batches for Vercel Hobby (10s serverless limit)
@@ -1794,11 +2096,22 @@ export default function BoardPage({ params }: BoardPageProps) {
 
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({ message: 'Failed to start enrichment' }))
-          throw new Error(errorData.message || `Failed to process batch ${batchIndex + 1}: ${errorData.message || 'Unknown error'}`)
+          const msg = errorData.message || 'Unknown error'
+          if (response.status === 429) {
+            throw new Error(
+              `Rate limited (${msg}). The app sends one request per small batch; wait ~1 minute, then continue or run again.`
+            )
+          }
+          throw new Error(msg || `Failed to process batch ${batchIndex + 1}`)
         }
 
         const result = await response.json()
-        const processedCount = result.processed || batchRowIds.length
+        const processedCount =
+          typeof result.stats?.updated === 'number'
+            ? result.stats.updated
+            : typeof result.processed === 'number'
+              ? result.processed
+              : batchRowIds.length
         
         totalProcessed += processedCount
         batchRowIds.forEach(id => allProcessedRowIds.add(id))
@@ -2093,7 +2406,7 @@ export default function BoardPage({ params }: BoardPageProps) {
       
       // Fetch all leads for export (not just the current view)
       const headers = getAuthHeaders()
-      const response = await fetch(`/api/leads?board_id=${params.id}&start=0&limit=10000`, { headers })
+      const response = await fetch(`/api/leads?board_id=${encodeURIComponent(params.id)}&start=0`, { headers })
       if (!response.ok) {
         throw new Error('Failed to fetch leads for export')
       }
@@ -2216,15 +2529,9 @@ export default function BoardPage({ params }: BoardPageProps) {
       )}
       <BoardHeader
         board={board}
-        viewStart={viewStart}
-        viewLimit={viewLimit}
         totalRows={totalRows}
         isLoading={isLoading}
         processingProgress={processingProgress}
-        onViewChange={(start, limit) => {
-          setViewStart(start)
-          setViewLimit(limit)
-        }}
         onRefresh={refetchLeads}
         onExportCSV={handleExportCSV}
         onAddLeads={() => setIsImportModalOpen(true)}
@@ -2235,6 +2542,7 @@ export default function BoardPage({ params }: BoardPageProps) {
         <div
           ref={setParentRef}
           className="h-full overflow-auto bg-background"
+          onScroll={handleTableScrollBump}
         >
           <div className="inline-block min-w-full bg-background relative">
             <DndContext
@@ -2256,7 +2564,32 @@ export default function BoardPage({ params }: BoardPageProps) {
                         items={sortableIds}
                         strategy={horizontalListSortingStrategy}
                       >
-                        {/* Render row index column first */}
+                        {headerGroup.headers
+                          .filter((h) => h.id === '__select')
+                          .map((header) => (
+                            <TableHead
+                              key={header.id}
+                              className="border-r border-border/60 border-b border-border/60 bg-muted/40 h-[38px] py-0 px-0 text-center align-middle sticky z-[52]"
+                              style={{
+                                width: ROW_SELECT_COL_WIDTH,
+                                minWidth: ROW_SELECT_COL_WIDTH,
+                                maxWidth: ROW_SELECT_COL_WIDTH,
+                                left: 0,
+                                top: 0,
+                                position: 'sticky',
+                              }}
+                            >
+                              <div className="flex items-center justify-center h-[38px] w-full">
+                                <SelectAllVisibleHeader
+                                  getVisibleLeadIds={getVisibleLeadIds}
+                                  selectedLeadIds={selectedLeadIds}
+                                  setSelectedLeadIds={setSelectedLeadIds}
+                                  viewportVersion={viewportVersion}
+                                />
+                              </div>
+                            </TableHead>
+                          ))}
+                        {/* Row index column (sticky after checkbox column) */}
                         {headerGroup.headers
                           .filter((h) => h.id === '__index')
                           .map((header) => {
@@ -2269,6 +2602,7 @@ export default function BoardPage({ params }: BoardPageProps) {
                                 onDelete={() => {}}
                                 onColorChange={() => {}}
                                 isIndexColumn={true}
+                                stickyLeftOffset={ROW_SELECT_COL_WIDTH}
                                 leads={leads}
                               />
                             )
@@ -2406,6 +2740,9 @@ export default function BoardPage({ params }: BoardPageProps) {
                         measureElement={rowVirtualizer.measureElement}
                         processingRecordIds={processingLeads}
                         processingColumnId={processingColumnId}
+                        onRowContextMenu={handleRowContextMenu}
+                        isRowSelected={selectedLeadIds.has(row.original.id)}
+                        onToggleRowSelect={toggleLeadSelection}
                       />
                     )
                   })}
@@ -2536,6 +2873,74 @@ export default function BoardPage({ params }: BoardPageProps) {
           </div>
         </DialogContent>
       </Dialog>
+
+      {selectedLeadIds.size > 0 && (
+        <div
+          className="fixed bottom-6 left-1/2 z-[90] -translate-x-1/2 flex items-center gap-3 rounded-xl border border-border/80 bg-background/95 px-4 py-3 shadow-lg backdrop-blur-sm"
+          role="toolbar"
+          aria-label="Row selection actions"
+        >
+          <span className="text-sm text-muted-foreground tabular-nums">
+            {selectedLeadIds.size} selected
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-2"
+            onClick={() => setSelectedLeadIds(new Set())}
+          >
+            <X className="h-4 w-4" />
+            Clear selection
+          </Button>
+          <Button
+            variant="destructive"
+            size="sm"
+            className="gap-2"
+            onClick={() => openDeleteRowsDialog([...selectedLeadIds])}
+          >
+            <Trash2 className="h-4 w-4" />
+            Delete {selectedLeadIds.size} row{selectedLeadIds.size === 1 ? '' : 's'}
+          </Button>
+        </div>
+      )}
+
+      {rowContextMenu && (
+        <div
+          role="menu"
+          className="fixed z-[100] min-w-[10rem] rounded-lg border bg-popover py-1 text-popover-foreground shadow-md"
+          style={{ left: rowContextMenu.x, top: rowContextMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="flex w-full items-center gap-2 px-3 py-2 text-sm text-left hover:bg-accent"
+            onClick={() => {
+              openDeleteRowsDialog([rowContextMenu.leadId])
+              setRowContextMenu(null)
+            }}
+          >
+            <Trash2 className="h-4 w-4" />
+            Delete row
+          </button>
+        </div>
+      )}
+
+      <AlertDialog
+        open={deleteRowsDialogOpen}
+        onOpenChange={(open) => {
+          setDeleteRowsDialogOpen(open)
+          if (!open) {
+            pendingDeleteIdsRef.current = []
+            setPendingDeleteIds([])
+          }
+        }}
+        title="Delete rows?"
+        description={`Are you sure you want to delete ${pendingDeleteIds.length} row${pendingDeleteIds.length === 1 ? '' : 's'}? This cannot be undone.`}
+        onConfirm={confirmBulkDelete}
+        confirmText={`Delete ${pendingDeleteIds.length} row${pendingDeleteIds.length === 1 ? '' : 's'}`}
+        cancelText="Cancel"
+      />
     </div>
   )
 }

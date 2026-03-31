@@ -13,60 +13,16 @@ import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
 
-/**
- * Remove column values from leads.data when RPC is missing or fails (e.g. older Supabase projects).
- * Tries UUID key, display name, and normalized_name keys.
- */
-async function stripColumnFromLeadsData(
-  boardId: string,
-  columnUuid: string,
-  columnName: string
-): Promise<{ ok: true } | { ok: false; message: string }> {
-  const keysToRemove = new Set<string>()
-  keysToRemove.add(columnUuid)
+/** Keys stored in leads.data for this column (UUID + legacy name / normalized keys). */
+function columnDataKeysToRemove(columnUuid: string, columnName: string): string[] {
+  const keys = new Set<string>()
+  keys.add(columnUuid)
   if (columnName?.trim()) {
-    keysToRemove.add(columnName.trim())
-    keysToRemove.add(columnName.trim().toLowerCase().replace(/\s+/g, '_'))
+    const t = columnName.trim()
+    keys.add(t)
+    keys.add(t.toLowerCase().replace(/\s+/g, '_'))
   }
-
-  const { data: leads, error: fetchError } = await supabaseAdmin
-    .from('leads')
-    .select('id, data')
-    .eq('board_id', boardId)
-
-  if (fetchError) {
-    return { ok: false, message: fetchError.message }
-  }
-
-  if (!leads?.length) {
-    return { ok: true }
-  }
-
-  for (const lead of leads) {
-    const d = lead.data as Record<string, unknown> | null
-    if (!d || typeof d !== 'object') continue
-
-    const next: Record<string, unknown> = { ...d }
-    let touched = false
-    for (const k of keysToRemove) {
-      if (Object.prototype.hasOwnProperty.call(next, k)) {
-        delete next[k]
-        touched = true
-      }
-    }
-    if (!touched) continue
-
-    const { error: updateError } = await supabaseAdmin
-      .from('leads')
-      .update({ data: next })
-      .eq('id', lead.id)
-
-    if (updateError) {
-      return { ok: false, message: updateError.message }
-    }
-  }
-
-  return { ok: true }
+  return Array.from(keys)
 }
 
 export async function GET(
@@ -136,13 +92,14 @@ export async function PATCH(
 
   try {
     const body = await request.json()
-    const { name, type, order, config, metadata } = body
+    const { name, type, order, position, config, metadata } = body
 
     // Build update object - ONLY for board_columns table fields
     const updateData: {
       name?: string
       type?: string
       order?: number
+      position?: number
       config?: any
     } = {}
 
@@ -177,6 +134,18 @@ export async function PATCH(
         )
       }
       updateData.order = order
+      updateData.position = order
+    }
+
+    if (position !== undefined) {
+      if (typeof position !== 'number' || position < 0) {
+        return NextResponse.json(
+          { message: 'position must be a non-negative number' },
+          { status: 400 }
+        )
+      }
+      updateData.position = position
+      updateData.order = position
     }
 
     if (config !== undefined) {
@@ -320,22 +289,31 @@ export async function DELETE(
     }
 
     // Step 1: Clean up column data from leads FIRST (before removing metadata).
-    // If cleanup fails, abort — leaving column metadata intact prevents data orphaning.
-    const { error: cleanupError } = await supabaseAdmin.rpc('delete_board_column_by_uuid', {
+    // Prefer one UPDATE for all rows (bulk_remove_jsonb_keys_from_board_leads — see SQL_BULK_REMOVE_COLUMN_KEYS.sql).
+    // If that RPC is not installed, fall back to delete_board_column_by_uuid.
+    const keys = columnDataKeysToRemove(column.id, column.name)
+
+    const { error: bulkError } = await supabaseAdmin.rpc('bulk_remove_jsonb_keys_from_board_leads', {
       p_board_id: column.board_id,
-      p_column_uuid: column.id,
+      p_keys: keys,
     })
 
-    if (cleanupError) {
+    if (bulkError) {
       console.warn(
-        'delete_board_column_by_uuid RPC failed; falling back to app-side JSONB cleanup:',
-        cleanupError
+        'bulk_remove_jsonb_keys_from_board_leads failed; trying delete_board_column_by_uuid:',
+        bulkError
       )
-      const fallback = await stripColumnFromLeadsData(column.board_id, column.id, column.name)
-      if (!fallback.ok) {
-        console.error('Fallback JSONB cleanup failed:', fallback.message)
+      const { error: uuidRpcError } = await supabaseAdmin.rpc('delete_board_column_by_uuid', {
+        p_board_id: column.board_id,
+        p_column_uuid: column.id,
+      })
+      if (uuidRpcError) {
+        console.error('Column data cleanup failed:', bulkError, uuidRpcError)
         return NextResponse.json(
-          { message: 'Failed to remove column data from leads. Column was not deleted.' },
+          {
+            message:
+              'Failed to remove column data from leads. Run SQL_BULK_REMOVE_COLUMN_KEYS.sql in the Supabase SQL editor, or ensure delete_board_column_by_uuid works. Column was not deleted.',
+          },
           { status: 500 }
         )
       }

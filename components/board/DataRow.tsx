@@ -7,6 +7,9 @@ import { TableRow, TableCell } from '@/components/ui/table'
 import { Lead, ColumnConfig } from '@/lib/types'
 import { Loader2 } from 'lucide-react'
 
+/** Width of sticky row checkbox column — must match page.tsx ROW_SELECT_COL_WIDTH */
+export const ROW_SELECT_COL_WIDTH = 40
+
 interface DataRowProps {
   row: Row<Lead>
   virtualRow: VirtualItem
@@ -16,6 +19,10 @@ interface DataRowProps {
   measureElement: (element: Element | null) => void
   processingRecordIds?: Set<string>
   processingColumnId?: string | null
+  onRowContextMenu?: (e: React.MouseEvent, lead: Lead) => void
+  /** Passed from parent so memoized rows re-render when selection changes */
+  isRowSelected?: boolean
+  onToggleRowSelect?: (leadId: string) => void
 }
 
 /**
@@ -31,6 +38,9 @@ export const DataRow = memo(function DataRow({
   measureElement,
   processingRecordIds = new Set(),
   processingColumnId = null,
+  onRowContextMenu,
+  isRowSelected = false,
+  onToggleRowSelect,
 }: DataRowProps) {
   const leadId = row.original.id
   const isRowProcessing = processingRecordIds.has(leadId)
@@ -42,6 +52,7 @@ export const DataRow = memo(function DataRow({
       ref={measureElement}
       aria-busy={isRowProcessing}
       className="h-[38px] bg-background hover:bg-muted/30"
+      onContextMenu={(e) => onRowContextMenu?.(e, row.original)}
       style={{
         position: 'absolute',
         top: 0,
@@ -51,6 +62,46 @@ export const DataRow = memo(function DataRow({
         transform: `translateY(${virtualRow.start}px)`,
       }}
     >
+      {/* Sticky row checkbox column */}
+      {row.getVisibleCells()
+        .filter((cell) => cell.column.id === '__select')
+        .map((cell) => {
+          const columnWidth = cell.column.getSize()
+          return (
+            <TableCell
+              key={cell.id}
+              style={{
+                width: columnWidth,
+                minWidth: columnWidth,
+                maxWidth: columnWidth,
+                position: 'sticky',
+                left: 0,
+                zIndex: 12,
+                padding: '0 8px',
+              }}
+              className="border-r border-border/60 border-b border-border/60 text-xs whitespace-nowrap overflow-hidden text-ellipsis bg-background h-[38px] py-0"
+            >
+              {cell.column.id === '__select' ? (
+                <div
+                  className="flex items-center justify-center h-full"
+                  onClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => e.stopPropagation()}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isRowSelected}
+                    onChange={() => onToggleRowSelect?.(row.original.id)}
+                    className="h-3.5 w-3.5 rounded border-input accent-primary cursor-pointer"
+                    aria-label="Select row"
+                  />
+                </div>
+              ) : (
+                flexRender(cell.column.columnDef.cell, cell.getContext())
+              )}
+            </TableCell>
+          )
+        })}
+
       {/* Render row index cell */}
       {row.getVisibleCells()
         .filter((cell) => cell.column.id === '__index')
@@ -64,11 +115,11 @@ export const DataRow = memo(function DataRow({
                 minWidth: columnWidth,
                 maxWidth: columnWidth,
                 position: 'sticky',
-                left: 0,
-                zIndex: 10,
+                left: ROW_SELECT_COL_WIDTH,
+                zIndex: 11,
                 padding: '0 12px',
               }}
-              className="border-r border-border/60 border-b border-border/60 text-xs whitespace-nowrap overflow-hidden text-ellipsis sticky left-0 bg-background h-[38px] py-0 text-center text-muted-foreground"
+              className="border-r border-border/60 border-b border-border/60 text-xs whitespace-nowrap overflow-hidden text-ellipsis bg-background h-[38px] py-0 text-center text-muted-foreground"
             >
               {flexRender(cell.column.columnDef.cell, cell.getContext())}
             </TableCell>
@@ -78,7 +129,7 @@ export const DataRow = memo(function DataRow({
       {/* Render data cells */}
       {row.getVisibleCells()
         .filter((cell) => {
-          if (cell.column.id === '__index') return false
+          if (cell.column.id === '__index' || cell.column.id === '__select') return false
           // Only render cells for columns that exist in config
           return columnConfigMap.has(cell.column.id)
         })
@@ -158,6 +209,21 @@ export const DataRow = memo(function DataRow({
   const rowDataChanged = prevProps.row.original !== nextProps.row.original ||
                          prevProps.row.original.data !== nextProps.row.original.data
 
+  const contextHandlerChanged = prevProps.onRowContextMenu !== nextProps.onRowContextMenu
+  const toggleHandlerChanged = prevProps.onToggleRowSelect !== nextProps.onToggleRowSelect
+  const selectionChanged = prevProps.isRowSelected !== nextProps.isRowSelected
+
   // Only skip re-render if nothing relevant changed
-  return !virtualizationChanged && !rowChanged && !columnConfigsChanged && !columnConfigMapChanged && !addingColumnChanged && !processingChanged && !rowDataChanged
+  return (
+    !virtualizationChanged &&
+    !rowChanged &&
+    !columnConfigsChanged &&
+    !columnConfigMapChanged &&
+    !addingColumnChanged &&
+    !processingChanged &&
+    !rowDataChanged &&
+    !contextHandlerChanged &&
+    !toggleHandlerChanged &&
+    !selectionChanged
+  )
 })

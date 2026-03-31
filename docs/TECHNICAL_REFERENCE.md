@@ -2,7 +2,7 @@
 
 A **Clay-like** B2B Data Enrichment & Management Platform built with Next.js 14, TypeScript, Tailwind CSS, Shadcn UI, and Supabase. Import any CSV file, automatically generate dynamic data grids, and manage your leads with a powerful spreadsheet-like interface and AI enrichment.
 
-For a high-level product and UX description, see `APP_DESCRIPTION.md` in this directory.
+For a high-level product and UX description, see [`APP_DESCRIPTION.md`](../APP_DESCRIPTION.md) at the repository root.
 
 ---
 

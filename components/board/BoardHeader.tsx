@@ -5,16 +5,12 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { ArrowLeft, Plus, Download } from 'lucide-react'
 import { Board } from '@/lib/types'
-import { RowViewController } from './RowViewController'
 
 interface BoardHeaderProps {
   board: Board | null
-  viewStart: number
-  viewLimit: number | null
   totalRows: number
   isLoading: boolean
   processingProgress?: { current: number; total: number } | null
-  onViewChange: (start: number, limit: number | null) => void
   onRefresh?: () => void
   onExportCSV: () => void
   onAddLeads: () => void
@@ -25,12 +21,9 @@ interface BoardHeaderProps {
  */
 function BoardHeader({
   board,
-  viewStart,
-  viewLimit,
   totalRows,
   isLoading,
   processingProgress,
-  onViewChange,
   onExportCSV,
   onAddLeads,
 }: BoardHeaderProps) {
@@ -57,13 +50,9 @@ function BoardHeader({
               <h1 className="text-lg font-semibold tracking-tight">
                 {displayName}
               </h1>
-              <RowViewController
-                viewStart={viewStart}
-                viewLimit={viewLimit}
-                totalRows={totalRows}
-                isLoading={isLoading}
-                onViewChange={onViewChange}
-              />
+              <span className="text-sm text-muted-foreground tabular-nums">
+                {isLoading ? '…' : `${totalRows} row${totalRows === 1 ? '' : 's'}`}
+              </span>
             </div>
           </div>
           <div className="flex items-center gap-2">

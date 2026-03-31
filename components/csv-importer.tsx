@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import Papa from 'papaparse'
 import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
@@ -15,7 +15,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Toast } from '@/components/ui/toast'
 import { CSVRow } from '@/lib/types'
-import { X, FileSpreadsheet } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { X, FileSpreadsheet, Upload } from 'lucide-react'
 
 interface CSVImporterProps {
   open: boolean
@@ -25,20 +26,44 @@ interface CSVImporterProps {
 
 const CHUNK_SIZE = 200
 
+/** Empty cell: null, undefined, "", or whitespace-only string. */
+function isNonEmptyCellValue(value: unknown): boolean {
+  if (value === null || value === undefined) return false
+  if (typeof value === 'string') return value.trim() !== ''
+  return String(value).trim() !== ''
+}
+
+/** Column "has data" iff at least one row has a non-empty value for that header. */
+function computeColumnsWithDataAnywhere(headers: string[], rows: CSVRow[]): Set<string> {
+  const withData = new Set<string>()
+  const n = headers.length
+  for (const row of rows) {
+    for (const h of headers) {
+      if (withData.has(h)) continue
+      if (isNonEmptyCellValue(row[h])) {
+        withData.add(h)
+      }
+    }
+    if (withData.size === n) break
+  }
+  return withData
+}
+
 export function CSVImporter({ open, onOpenChange, onImportComplete }: CSVImporterProps) {
   const router = useRouter()
   const [file, setFile] = useState<File | null>(null)
-  const [preview, setPreview] = useState<CSVRow[]>([])
+  const [columnsWithData, setColumnsWithData] = useState<Set<string>>(() => new Set())
   const [headers, setHeaders] = useState<string[]>([])
   const [selectedColumns, setSelectedColumns] = useState<Set<string>>(new Set())
   const [isImporting, setIsImporting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [progress, setProgress] = useState<{ current: number; total: number; message: string } | null>(null)
+  const [boardName, setBoardName] = useState('')
+  const [isDragging, setIsDragging] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0]
+  const processSelectedFile = useCallback((selectedFile: File | undefined | null) => {
     if (!selectedFile) return
 
     if (!selectedFile.name.endsWith('.csv')) {
@@ -47,27 +72,23 @@ export function CSVImporter({ open, onOpenChange, onImportComplete }: CSVImporte
     }
 
     setFile(selectedFile)
+    setBoardName(selectedFile.name.replace(/\.csv$/i, '').trim() || 'Untitled Board')
     setError(null)
 
-    // CRITICAL: Read file as UTF-8 text explicitly to preserve special characters
-    // This ensures French accents (é, à, ç, etc.) are correctly decoded
     const reader = new FileReader()
     reader.onload = (event) => {
       try {
-        // FileReader.readAsText() with UTF-8 encoding ensures proper character decoding
         const csvText = event.target?.result as string
-        
+
         if (!csvText) {
           setError('Failed to read CSV file')
           return
         }
 
-        // Parse CSV text with explicit UTF-8 handling
-        // Note: Ensure your CSV file is saved as UTF-8 (e.g., "CSV UTF-8 (Comma delimited)" in Excel)
         Papa.parse(csvText, {
           header: true,
           skipEmptyLines: true,
-          encoding: 'UTF-8', // Explicitly set UTF-8 encoding for proper character handling
+          encoding: 'UTF-8',
           complete: (results) => {
             if (results.errors.length > 0) {
               setError(`CSV parsing error: ${results.errors[0].message}`)
@@ -80,10 +101,13 @@ export function CSVImporter({ open, onOpenChange, onImportComplete }: CSVImporte
               return
             }
 
-            const csvHeaders = Object.keys(rows[0])
+            // Papa's meta.fields is the header row left-to-right; Object.keys(row) is not guaranteed to match.
+            const csvHeaders =
+              results.meta.fields && results.meta.fields.length > 0
+                ? [...results.meta.fields]
+                : Object.keys(rows[0])
             setHeaders(csvHeaders)
-            setPreview(rows.slice(0, 5)) // Show first 5 rows as preview
-            // Select all columns by default
+            setColumnsWithData(new Set(computeColumnsWithDataAnywhere(csvHeaders, rows)))
             setSelectedColumns(new Set(csvHeaders))
           },
           error: (error: Error) => {
@@ -94,13 +118,55 @@ export function CSVImporter({ open, onOpenChange, onImportComplete }: CSVImporte
         setError(`Error reading file: ${err instanceof Error ? err.message : 'Unknown error'}`)
       }
     }
-    
+
     reader.onerror = () => {
       setError('Failed to read CSV file')
     }
-    
-    // Read file as UTF-8 text (explicit encoding)
+
     reader.readAsText(selectedFile, 'UTF-8')
+  }, [])
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    processSelectedFile(e.target.files?.[0])
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!isImporting) setIsDragging(true)
+  }
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(false)
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDragging(false)
+    if (isImporting) return
+    const dropped = e.dataTransfer.files?.[0]
+    processSelectedFile(dropped)
+  }
+
+  const clearFile = () => {
+    if (isImporting) return
+    setFile(null)
+    setBoardName('')
+    setColumnsWithData(new Set())
+    setHeaders([])
+    setSelectedColumns(new Set())
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
+  }
+
+  function formatFileSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   }
 
   const handleImport = async () => {
@@ -156,20 +222,27 @@ export function CSVImporter({ open, onOpenChange, onImportComplete }: CSVImporte
         throw new Error('CSV file is empty')
       }
 
-      // Generate board name from filename (remove .csv extension)
-      const boardName = file.name.replace(/\.csv$/i, '').trim() || 'Untitled Board'
+      const headerFields =
+        parseResult.meta.fields && parseResult.meta.fields.length > 0
+          ? [...parseResult.meta.fields]
+          : Object.keys(rows[0])
+
+      const resolvedBoardName = boardName.trim() || file.name.replace(/\.csv$/i, '').trim() || 'Untitled Board'
+
+      // Preserve CSV column order in each row object (JSON.stringify follows key insertion order).
+      const selectedInCsvOrder = headerFields.filter((field) => selectedColumns.has(field))
       
       // Transform rows: pack ONLY selected columns into data JSONB
       // IMPORTANT: Process ALL rows, no limits
       const transformedRows = rows.map((row) => {
-        // Clean up the row data - only include selected columns
         const cleanedData: Record<string, any> = {}
-        selectedColumns.forEach((key) => {
-          const value = row[key]?.trim()
+        for (const key of selectedInCsvOrder) {
+          const raw = row[key]
+          const value = typeof raw === 'string' ? raw.trim() : raw
           if (value !== undefined && value !== '') {
             cleanedData[key] = value
           }
-        })
+        }
         return { data: cleanedData }
       })
 
@@ -197,8 +270,9 @@ export function CSVImporter({ open, onOpenChange, onImportComplete }: CSVImporte
             'Content-Type': 'application/json; charset=utf-8', // Explicitly set UTF-8 charset
           },
           body: JSON.stringify({
-            boardName,
+            boardName: resolvedBoardName,
             firstChunk: chunks[0],
+            columnOrder: selectedInCsvOrder,
           }),
         })
 
@@ -337,7 +411,8 @@ export function CSVImporter({ open, onOpenChange, onImportComplete }: CSVImporte
 
   const resetForm = () => {
     setFile(null)
-    setPreview([])
+    setBoardName('')
+    setColumnsWithData(new Set())
     setHeaders([])
     setSelectedColumns(new Set())
     setError(null)
@@ -367,9 +442,7 @@ export function CSVImporter({ open, onOpenChange, onImportComplete }: CSVImporte
     setSelectedColumns(new Set())
   }
 
-  const visibleHeaders = headers.filter((h) => selectedColumns.has(h))
   const allSelected = headers.length > 0 && selectedColumns.size === headers.length
-  const someSelected = selectedColumns.size > 0 && selectedColumns.size < headers.length
 
   const handleClose = () => {
     if (!isImporting) {
@@ -381,191 +454,235 @@ export function CSVImporter({ open, onOpenChange, onImportComplete }: CSVImporte
   return (
     <>
       <Dialog open={open} onOpenChange={handleClose}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Import CSV File</DialogTitle>
-            <DialogDescription>
-              Upload a CSV file and select which columns to import. Only selected columns will be stored in the board.
-            </DialogDescription>
-          </DialogHeader>
+        <DialogContent className="max-w-4xl max-h-[92vh] gap-0 overflow-hidden border-border/80 p-0 shadow-xl sm:rounded-2xl">
+          <div className="max-h-[92vh] overflow-y-auto">
+            <DialogHeader className="space-y-1 border-b border-border/60 px-8 pb-6 pt-8 text-left">
+              <DialogTitle className="text-xl font-semibold tracking-tight">
+                Import from CSV
+              </DialogTitle>
+              <DialogDescription className="text-sm leading-relaxed text-muted-foreground">
+                Upload a spreadsheet and choose which columns to bring into a new board. UTF-8 CSVs work best for special characters.
+              </DialogDescription>
+            </DialogHeader>
 
-          <div className="space-y-5">
-            <div className="space-y-2">
-              <Label htmlFor="csv-file">CSV File</Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  id="csv-file"
-                  type="file"
-                  accept=".csv"
-                  onChange={handleFileSelect}
-                  ref={fileInputRef}
-                  disabled={isImporting}
-                />
-                {file && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => {
-                      if (!isImporting) {
-                        setFile(null)
-                        setPreview([])
-                        setHeaders([])
-                        if (fileInputRef.current) {
-                          fileInputRef.current.value = ''
-                        }
-                      }
-                    }}
+            <div className="space-y-8 px-8 py-8">
+              <input
+                id="csv-file"
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                className="sr-only"
+                onChange={handleFileSelect}
+                disabled={isImporting}
+              />
+
+              {!file ? (
+                <div className="space-y-2">
+                  <Label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    File
+                  </Label>
+                  <button
+                    type="button"
                     disabled={isImporting}
+                    onClick={() => fileInputRef.current?.click()}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    className={cn(
+                      'group flex w-full flex-col items-center justify-center rounded-xl border-2 border-dashed px-6 py-14 transition-all duration-200',
+                      'bg-muted/30 hover:bg-muted/45',
+                      isDragging
+                        ? 'border-primary/60 bg-primary/[0.04] ring-2 ring-primary/20'
+                        : 'border-border/80 hover:border-border',
+                      isImporting && 'pointer-events-none opacity-50'
+                    )}
                   >
-                    <X className="h-4 w-4" />
-                  </Button>
-                )}
-              </div>
-              {file && (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-lg px-3 py-2">
-                  <FileSpreadsheet className="h-4 w-4 flex-shrink-0" />
-                  <div>
-                    <span className="font-medium text-foreground">{file.name}</span>{' '}
-                    <span>({(file.size / 1024).toFixed(2)} KB)</span>
-                    <br />
-                    <span className="text-xs">
-                      Board name: <span className="font-medium">{file.name.replace(/\.csv$/i, '').trim() || 'Untitled Board'}</span>
-                    </span>
+                    <div
+                      className={cn(
+                        'mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-border/60 bg-background shadow-sm transition-transform duration-200',
+                        'group-hover:scale-105',
+                        isDragging && 'scale-105 border-primary/30'
+                      )}
+                    >
+                      <Upload className="h-5 w-5 text-muted-foreground group-hover:text-foreground" />
+                    </div>
+                    <p className="text-center text-sm font-medium text-foreground">
+                      Drop your CSV here or{' '}
+                      <span className="text-primary underline-offset-4 group-hover:underline">click to browse</span>
+                    </p>
+                    <p className="mt-2 text-center text-xs text-muted-foreground">
+                      Comma-separated values · UTF-8 recommended
+                    </p>
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  <div className="space-y-2">
+                    <Label className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                      File
+                    </Label>
+                    <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-card px-4 py-3 shadow-sm">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                        <FileSpreadsheet className="h-5 w-5" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-foreground">{file.name}</p>
+                        <p className="text-xs text-muted-foreground tabular-nums">
+                          {formatFileSize(file.size)}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-9 w-9 shrink-0 rounded-full text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                        onClick={clearFile}
+                        disabled={isImporting}
+                        aria-label="Remove file"
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="board-name" className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                      Board name
+                    </Label>
+                    <Input
+                      id="board-name"
+                      value={boardName}
+                      onChange={(e) => setBoardName(e.target.value)}
+                      disabled={isImporting}
+                      placeholder="Untitled board"
+                      className="h-11 rounded-lg border-border/80 bg-background text-base font-medium shadow-sm transition-shadow focus-visible:ring-offset-0"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Shown on your dashboard. Defaults to the file name without <code className="rounded bg-muted px-1 py-0.5 text-[11px]">.csv</code>.
+                    </p>
                   </div>
                 </div>
               )}
-            </div>
 
-            {error && (
-              <div className="p-3 bg-destructive/10 text-destructive rounded-lg text-sm border border-destructive/20">
-                {error}
-              </div>
-            )}
-
-            {progress && (
-              <div className="p-4 bg-muted/50 rounded-lg border border-border/60">
-                <div className="flex items-center justify-between mb-2.5">
-                  <span className="text-sm font-medium">{progress.message}</span>
-                  <span className="text-sm text-muted-foreground tabular-nums">
-                    {progress.current} / {progress.total} chunks
-                  </span>
+              {error && (
+                <div className="rounded-xl border border-destructive/25 bg-destructive/[0.06] px-4 py-3 text-sm text-destructive">
+                  {error}
                 </div>
-                <div className="w-full bg-background rounded-full h-1.5">
-                  <div
-                    className="bg-primary h-1.5 rounded-full transition-all duration-300"
-                    style={{ width: `${(progress.current / progress.total) * 100}%` }}
-                  />
-                </div>
-              </div>
-            )}
+              )}
 
-            {headers.length > 0 && (
-              <div className="space-y-4">
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <h3 className="text-sm font-medium">
-                      Select Columns to Import ({selectedColumns.size} of {headers.length} selected)
-                    </h3>
-                    <div className="flex gap-2">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={selectAllColumns}
-                        disabled={allSelected}
-                        className="h-7 text-xs"
-                      >
-                        Select All
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={deselectAllColumns}
-                        disabled={selectedColumns.size === 0}
-                        className="h-7 text-xs"
-                      >
-                        Deselect All
-                      </Button>
-                    </div>
+              {progress && (
+                <div className="rounded-xl border border-border/60 bg-muted/25 px-5 py-4">
+                  <div className="mb-3 flex items-start justify-between gap-4">
+                    <span className="text-sm font-medium leading-snug text-foreground">{progress.message}</span>
+                    <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+                      {progress.current} / {progress.total}
+                    </span>
                   </div>
-                  <div className="border border-border/60 rounded-xl p-4 max-h-48 overflow-y-auto bg-muted/20">
-                    <div className="space-y-1">
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-background/80">
+                    <div
+                      className="h-full rounded-full bg-primary transition-all duration-300 ease-out"
+                      style={{ width: `${(progress.current / progress.total) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {headers.length > 0 && (
+                <div className="space-y-8 border-t border-border/50 pt-8">
+                  <div>
+                    <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <h3 className="text-sm font-semibold text-foreground">Columns</h3>
+                        <p className="mt-0.5 text-xs text-muted-foreground">
+                          {selectedColumns.size} of {headers.length} selected
+                        </p>
+                      </div>
+                      <div className="flex gap-1">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={selectAllColumns}
+                          disabled={allSelected}
+                          className="h-8 text-xs text-muted-foreground"
+                        >
+                          Select all
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={deselectAllColumns}
+                          disabled={selectedColumns.size === 0}
+                          className="h-8 text-xs text-muted-foreground"
+                        >
+                          Deselect all
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
                       {headers.map((header) => {
                         const isSelected = selectedColumns.has(header)
+                        const hasData = columnsWithData.has(header)
                         return (
-                          <label
+                          <button
                             key={header}
-                            className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/50 cursor-pointer transition-colors"
-                          >
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              onChange={() => toggleColumn(header)}
-                              className="w-4 h-4 rounded border-border accent-primary"
-                            />
-                            <span className="text-sm font-mono flex-1">{header}</span>
-                            {preview.length > 0 && (
-                              <span className={`text-xs px-2 py-0.5 rounded-md ${preview[0][header] ? 'bg-emerald-500/10 text-emerald-600' : 'bg-muted text-muted-foreground'}`}>
-                                {preview[0][header] ? 'Has data' : 'Empty'}
-                              </span>
+                            type="button"
+                            onClick={() => toggleColumn(header)}
+                            disabled={isImporting}
+                            title={
+                              hasData
+                                ? 'At least one row has a value in this column'
+                                : 'Empty in every row for this column'
+                            }
+                            className={cn(
+                              'inline-flex max-w-full items-center gap-2 rounded-full px-3 py-1.5 text-left text-sm font-medium transition-colors',
+                              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+                              isSelected
+                                ? 'border border-transparent bg-primary text-primary-foreground shadow-sm hover:bg-primary/90'
+                                : cn(
+                                    'border border-border bg-background hover:bg-muted/50',
+                                    hasData
+                                      ? 'text-foreground/90'
+                                      : 'text-muted-foreground opacity-75'
+                                  )
                             )}
-                          </label>
+                          >
+                            <span
+                              className={cn(
+                                'h-1.5 w-1.5 shrink-0 rounded-full',
+                                isSelected
+                                  ? 'bg-primary-foreground/90'
+                                  : hasData
+                                    ? 'bg-primary'
+                                    : 'bg-muted-foreground/35'
+                              )}
+                              aria-hidden
+                            />
+                            <span className="truncate font-mono text-xs sm:text-sm">{header}</span>
+                          </button>
                         )
                       })}
                     </div>
+                    {selectedColumns.size === 0 && (
+                      <p className="mt-2 text-sm text-destructive">Select at least one column to import.</p>
+                    )}
                   </div>
-                  {selectedColumns.size === 0 && (
-                    <p className="text-sm text-destructive mt-2">
-                      Please select at least one column to import.
-                    </p>
-                  )}
                 </div>
+              )}
 
-                {preview.length > 0 && visibleHeaders.length > 0 && (
-                  <div>
-                    <h3 className="text-sm font-medium mb-2">
-                      Preview (first 5 rows - showing selected columns only)
-                    </h3>
-                    <div className="border border-border/60 rounded-xl overflow-x-auto">
-                      <table className="w-full text-sm">
-                        <thead className="bg-muted/50">
-                          <tr>
-                            {visibleHeaders.map((header) => (
-                              <th key={header} className="px-3 py-2 text-left border-r border-border/40 font-medium text-muted-foreground">
-                                {header}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {preview.map((row, idx) => (
-                            <tr key={idx} className="border-t border-border/40 hover:bg-muted/20 transition-colors">
-                              {visibleHeaders.map((header) => (
-                                <td key={header} className="px-3 py-2 border-r border-border/40 font-mono text-sm">
-                                  {row[header] || <span className="text-muted-foreground">-</span>}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
+              <div className="flex flex-col-reverse gap-2 border-t border-border/50 pt-6 sm:flex-row sm:justify-end sm:gap-3">
+                <Button variant="outline" onClick={handleClose} disabled={isImporting} className="rounded-lg sm:min-w-[100px]">
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleImport}
+                  disabled={!file || isImporting || headers.length === 0 || selectedColumns.size === 0}
+                  className="rounded-lg sm:min-w-[180px]"
+                >
+                  {isImporting ? 'Importing…' : 'Import & create board'}
+                </Button>
               </div>
-            )}
-
-            <div className="flex justify-end gap-3 pt-2">
-              <Button variant="outline" onClick={handleClose} disabled={isImporting}>
-                Cancel
-              </Button>
-              <Button
-                onClick={handleImport}
-                disabled={!file || isImporting || preview.length === 0 || selectedColumns.size === 0}
-              >
-                {isImporting ? 'Importing...' : 'Import & Create Board'}
-              </Button>
             </div>
           </div>
         </DialogContent>

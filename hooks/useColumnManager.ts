@@ -21,6 +21,8 @@ interface UseColumnManagerReturn {
   setHasInitialized: (value: boolean) => void
   saveColumnConfig: (configs: ColumnConfig[]) => Promise<void>
   saveColumnConfigDebounced: (configs: ColumnConfig[]) => void
+  /** Persist drag-reorder for board_columns (single batch API); legacy boards use saveColumnConfig. */
+  persistColumnOrder: (orderedConfigs: ColumnConfig[]) => Promise<void>
   handleColumnRename: (columnId: string, newHeader: string) => Promise<void>
   handleDeleteColumn: (columnId: string) => Promise<void>
   handleColumnColorChange: (columnId: string, color: string) => void
@@ -53,21 +55,24 @@ interface UseColumnManagerReturn {
  *
  * Priority:
  *  1. Explicit flag on the board object (most reliable).
- *  2. Duck-type inspection of the first column element as a fallback.
+ *  2. Duck-type: board_columns rows have UUID id, name, and type (legacy JSON configs use `header`, not `name`/`type`).
  *  3. Empty columns array → false (cannot determine, assume old system).
  */
 function detectIsNewSystem(board: Board): boolean {
-  // Explicit flag takes priority over duck-typing
   if (board.isNewColumnSystem === true) return true
   if (board.isNewColumnSystem === false) return false
 
-  // Fallback: duck-type the first element
   if (!Array.isArray(board.columns) || board.columns.length === 0) {
     return false
   }
-  const first = board.columns[0]
-  // New system rows have an 'id' UUID but no legacy 'name' string key at root level
-  return 'id' in first && !('name' in first)
+  const first = board.columns[0] as unknown as Record<string, unknown>
+  const id = first['id']
+  return (
+    typeof first['name'] === 'string' &&
+    typeof first['type'] === 'string' &&
+    typeof id === 'string' &&
+    isValidUUID(id)
+  )
 }
 
 /** Validate that a string looks like a UUID (8-4-4-4-12 hex). */
@@ -193,6 +198,7 @@ export function useColumnManager({
               signal: controller.signal,
               body: JSON.stringify({
                 order: config.order,
+                position: config.order,
                 config: updatedConfig,
               }),
             }).then(async (response) => {
@@ -249,6 +255,48 @@ export function useColumnManager({
       }
     },
     [board, isSavingColumns, deletedColumnIds, onBoardUpdate]
+  )
+
+  const persistColumnOrder = useCallback(
+    async (orderedConfigs: ColumnConfig[]) => {
+      if (!board) return
+
+      if (!detectIsNewSystem(board)) {
+        await saveColumnConfig(orderedConfigs)
+        return
+      }
+
+      const orderedColumnIds = orderedConfigs.map((c) => c.id).filter(isValidUUID)
+      if (orderedColumnIds.length === 0) return
+
+      try {
+        const headers = getAuthHeaders()
+        const controller = createController()
+        const response = await fetch(
+          `/api/boards/${encodeURIComponent(boardId)}/columns/reorder`,
+          {
+            method: 'POST',
+            headers,
+            signal: controller.signal,
+            body: JSON.stringify({ orderedColumnIds }),
+          }
+        )
+
+        if (!response.ok) {
+          const errText = await response.text()
+          console.error('persistColumnOrder failed:', response.status, errText)
+          onToast('Failed to save column order', 'destructive')
+          return
+        }
+
+        await onBoardUpdate()
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') return
+        console.error('persistColumnOrder error:', error)
+        onToast('Failed to save column order', 'destructive')
+      }
+    },
+    [board, boardId, onBoardUpdate, onToast, saveColumnConfig]
   )
 
   // Debounced save function
@@ -719,6 +767,7 @@ export function useColumnManager({
     setHasInitialized,
     saveColumnConfig,
     saveColumnConfigDebounced,
+    persistColumnOrder,
     handleColumnRename,
     handleDeleteColumn,
     handleColumnColorChange,

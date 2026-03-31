@@ -20,7 +20,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json()
-    const { boardName, firstChunk } = body
+    const { boardName, firstChunk, columnOrder } = body
 
     if (!boardName || typeof boardName !== 'string') {
       return NextResponse.json(
@@ -67,25 +67,50 @@ export async function POST(request: NextRequest) {
 
     const boardId = boardData.id
 
-    // Extract column names from the first chunk
-    // Use a Map to track the canonical (first-seen) version of each key
-    // This prevents duplicates with different capitalizations
-    const columnMap = new Map<string, string>() // normalized key -> original key
+    // Scan chunk for any header keys not listed in columnOrder (older clients / edge cases)
+    const columnMapFromData = new Map<string, string>() // normalized -> original spelling from data
     firstChunk.forEach((lead: { data: Record<string, any> }) => {
       if (lead.data && typeof lead.data === 'object') {
         Object.keys(lead.data).forEach((key) => {
           if (key && key.trim()) {
-            // Normalize to lowercase for comparison
             const normalized = key.toLowerCase()
-            // Only add if we haven't seen this normalized key before
-            // This ensures we use the first occurrence as the canonical version
-            if (!columnMap.has(normalized)) {
-              columnMap.set(normalized, key)
+            if (!columnMapFromData.has(normalized)) {
+              columnMapFromData.set(normalized, key)
             }
           }
         })
       }
     })
+
+    // Ordered column names: CSV left-to-right when client sends columnOrder (Papa meta.fields);
+    // never sort alphabetically. Append data-only keys after, in first-seen row order.
+    const orderedColumnNames: string[] = []
+    const seenNorm = new Set<string>()
+
+    if (Array.isArray(columnOrder) && columnOrder.length > 0) {
+      for (const raw of columnOrder) {
+        if (typeof raw !== 'string' || !raw.trim()) continue
+        const normalized = raw.trim().toLowerCase()
+        if (seenNorm.has(normalized)) continue
+        seenNorm.add(normalized)
+        // Must match keys in lead.data (Papa field names from the client)
+        orderedColumnNames.push(raw.trim())
+      }
+      for (const [normalized, original] of columnMapFromData) {
+        if (!seenNorm.has(normalized)) {
+          seenNorm.add(normalized)
+          orderedColumnNames.push(original)
+        }
+      }
+    } else {
+      for (const [, original] of columnMapFromData) {
+        const normalized = original.toLowerCase()
+        if (!seenNorm.has(normalized)) {
+          seenNorm.add(normalized)
+          orderedColumnNames.push(original)
+        }
+      }
+    }
 
     // Check for existing columns to prevent duplicates
     const { data: existingColumns } = await supabaseAdmin
@@ -101,21 +126,16 @@ export async function POST(request: NextRequest) {
     // This ensures data is stored with UUID keys, not header names
     const columnMapping: Record<string, string> = {} // header name -> column UUID
 
-    if (columnMap.size > 0) {
-      const columnsToInsert = Array.from(columnMap.entries())
-        .filter(([normalized]) => {
-          // Skip if a column with this name (case-insensitive) already exists
-          return !existingNames.has(normalized)
-        })
-        .map(([, original], index) => {
-          // Use the original (first-seen) key as the column name
-          // Estimate width based on key length
+    if (orderedColumnNames.length > 0) {
+      const columnsToInsert = orderedColumnNames
+        .filter((original) => !existingNames.has(original.toLowerCase()))
+        .map((original, index) => {
           const estimatedWidth = Math.min(Math.max(original.length * 8 + 40, 120), 400)
 
           return {
             board_id: boardId,
-            name: original, // Use original key from first occurrence
-            type: 'text', // Default type, can be changed later
+            name: original,
+            type: 'text',
             order: index,
             config: {
               width: estimatedWidth,

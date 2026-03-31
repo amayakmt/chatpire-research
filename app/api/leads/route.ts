@@ -31,10 +31,9 @@ export async function GET(request: NextRequest) {
     }
     const start = startRaw
 
-    // Default cap when omitted avoids full-table fetches timing out on large boards (e.g. Vercel)
-    const DEFAULT_LIMIT = 2000
+    // Omitted `limit` = fetch every row for this board (batched). limit=0 means the same.
     let limit: number | null = null
-    if (limitParam) {
+    if (limitParam !== null && limitParam !== '') {
       const limitRaw = parseInt(limitParam, 10)
       if (isNaN(limitRaw) || limitRaw < 0) {
         return NextResponse.json(
@@ -42,9 +41,13 @@ export async function GET(request: NextRequest) {
           { status: 400 }
         )
       }
-      limit = Math.min(limitRaw, 5000)
+      if (limitRaw === 0) {
+        limit = null
+      } else {
+        limit = Math.min(limitRaw, 5000)
+      }
     } else {
-      limit = DEFAULT_LIMIT
+      limit = null
     }
 
     // Always get the total count first (regardless of limit)

@@ -14,17 +14,14 @@ interface UseBoardDataReturn {
   isLoading: boolean
   error: string | null
   totalRows: number
-  viewStart: number
-  viewLimit: number | null
-  setViewStart: (start: number) => void
-  setViewLimit: (limit: number | null) => void
+  setTotalRows: React.Dispatch<React.SetStateAction<number>>
   refetchLeads: () => Promise<void>
   refetchBoard: () => Promise<void>
 }
 
 /**
- * Custom hook for managing board data fetching and pagination.
- * Handles fetching leads and board data, with localStorage persistence for pagination settings.
+ * Custom hook for managing board data fetching.
+ * Loads the full lead set for the board (GET /api/leads with no limit).
  */
 export function useBoardData({ boardId }: UseBoardDataProps): UseBoardDataReturn {
   const [leads, setLeads] = useState<Lead[]>([])
@@ -32,39 +29,6 @@ export function useBoardData({ boardId }: UseBoardDataProps): UseBoardDataReturn
   const [isLoading, setIsLoading] = useState(true)
   const [totalRows, setTotalRows] = useState(0)
   const [error, setError] = useState<string | null>(null)
-
-  // Initialize with safe defaults — localStorage is read in a useEffect below
-  // to avoid SSR/client hydration mismatches.
-  const [viewStart, setViewStart] = useState(0)
-  const [viewLimit, setViewLimit] = useState<number | null>(100)
-
-  // Initialize from localStorage after first render (avoids SSR mismatch)
-  useEffect(() => {
-    const savedStart = localStorage.getItem(`rowView_${boardId}_start`)
-    const savedLimit = localStorage.getItem(`rowView_${boardId}_limit`)
-
-    if (savedStart) {
-      const parsed = Number(savedStart)
-      if (!isNaN(parsed) && parsed >= 0) setViewStart(parsed)
-    }
-
-    if (savedLimit !== null) {
-      if (savedLimit === 'null') {
-        setViewLimit(null)
-      } else {
-        const parsed = Number(savedLimit)
-        if (!isNaN(parsed) && parsed > 0 && parsed <= 10000) setViewLimit(parsed)
-      }
-    }
-  }, [boardId])
-
-  // Save row view settings to localStorage whenever they change
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(`rowView_${boardId}_start`, viewStart.toString())
-      localStorage.setItem(`rowView_${boardId}_limit`, viewLimit === null ? 'null' : viewLimit.toString())
-    }
-  }, [boardId, viewStart, viewLimit])
 
   const getAuthHeaders = (): Record<string, string> => {
     return {
@@ -97,11 +61,8 @@ export function useBoardData({ boardId }: UseBoardDataProps): UseBoardDataReturn
         setIsLoading(true)
         const queryParams = new URLSearchParams({
           board_id: boardId,
-          start: viewStart.toString(),
+          start: '0',
         })
-        if (viewLimit !== null) {
-          queryParams.append('limit', viewLimit.toString())
-        }
 
         const headers = getAuthHeaders()
         const response = await fetch(`/api/leads?${queryParams.toString()}`, {
@@ -122,7 +83,7 @@ export function useBoardData({ boardId }: UseBoardDataProps): UseBoardDataReturn
         setIsLoading(false)
       }
     },
-    [boardId, viewStart, viewLimit]
+    [boardId]
   )
 
   // Expose a stable refetchLeads that callers can await without needing a signal
@@ -148,10 +109,7 @@ export function useBoardData({ boardId }: UseBoardDataProps): UseBoardDataReturn
     isLoading,
     error,
     totalRows,
-    viewStart,
-    viewLimit,
-    setViewStart,
-    setViewLimit,
+    setTotalRows,
     refetchLeads,
     refetchBoard: fetchBoard,
   }

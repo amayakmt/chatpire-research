@@ -37,6 +37,8 @@ interface ColumnHeaderProps {
   onResize?: (columnId: string, newWidth: number) => void
   onResizeEnd?: (columnId: string, newWidth: number) => void
   isIndexColumn: boolean
+  /** Horizontal offset when a sticky column (e.g. row checkbox) sits to the left of the index column */
+  stickyLeftOffset?: number
   leads?: any[]
 }
 
@@ -80,6 +82,7 @@ function ColumnHeader({
   onResize,
   onResizeEnd,
   isIndexColumn,
+  stickyLeftOffset = 0,
 }: ColumnHeaderProps) {
   const [showColorPicker, setShowColorPicker] = useState(false)
   const canSort = header.column.getCanSort()
@@ -264,7 +267,7 @@ function ColumnHeader({
         minWidth: columnWidth,
         maxWidth: columnWidth,
         position: isIndexColumn ? 'sticky' : 'relative',
-        left: isIndexColumn ? 0 : undefined,
+        left: isIndexColumn ? stickyLeftOffset : undefined,
         zIndex: isIndexColumn ? 51 : 50,
         padding: '0 12px',
         touchAction: 'none',
@@ -281,7 +284,7 @@ function ColumnHeader({
       }}
       className={`relative border-r border-border/60 border-b border-border/60 font-semibold text-sm text-foreground h-[38px] py-0 whitespace-nowrap overflow-hidden group ${
         isIndexColumn
-          ? 'sticky left-0 bg-muted/40 text-center'
+          ? 'sticky bg-muted/40 text-center'
           : 'bg-muted/40'
       } ${isDragging ? 'opacity-50 bg-muted' : ''}`}
     >

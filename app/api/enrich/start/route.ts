@@ -501,8 +501,13 @@ async function updateBatchResults(
 
 export async function POST(request: NextRequest) {
   const ip = getClientIp(request)
-  if (!checkRateLimit(ip, 10, 60_000)) {
-    return NextResponse.json({ message: 'Too many requests' }, { status: 429 })
+  // One AI run issues many sequential POSTs (small batches for serverless timeouts).
+  // 10/min capped every board at ~50 rows; use a higher budget so large runs work.
+  if (!checkRateLimit(ip, 400, 60_000)) {
+    return NextResponse.json(
+      { message: 'Too many enrichment requests. Wait a minute and try again.' },
+      { status: 429 }
+    )
   }
 
   try {
