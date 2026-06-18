@@ -6,8 +6,6 @@ An AI-powered B2B lead enrichment platform — import CSVs, enrich rows with LLM
 
 <!-- TODO: Add screenshot.png to repo root and verify image displays on GitHub -->
 
-![Screenshot](screenshot.png)
-
 ## What it does
 
 - **CSV import** — Upload any spreadsheet; columns are inferred with no fixed schema up front.
