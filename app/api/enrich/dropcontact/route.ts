@@ -72,8 +72,10 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Normalize column name for storage (same as AI enrichment)
-    const columnKey = column.name.toLowerCase().replace(/\s+/g, '_')
+    // Store under the column UUID — the single source of truth used everywhere
+    // else (AI enrichment, cell reads). Keying by UUID (not the display name)
+    // keeps results readable after a column rename.
+    const columnKey = column.id
 
     // Prepare DropContact API payload
     const dropcontactPayload = {

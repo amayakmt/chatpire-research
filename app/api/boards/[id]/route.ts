@@ -66,17 +66,11 @@ export async function GET(
       order: col.position ?? col.order ?? 0,
     }))
 
-    const isNewColumnSystem =
-      Array.isArray(normalizedColumns) &&
-      normalizedColumns.length > 0 &&
-      typeof (normalizedColumns[0] as { type?: unknown }).type === 'string'
-
-    // Return board with columns
+    // Columns are always sourced from the board_columns table (single source of truth).
     return NextResponse.json({
       board: {
         ...board,
         columns: normalizedColumns,
-        isNewColumnSystem,
       },
     })
   } catch (error) {
@@ -99,53 +93,18 @@ export async function PATCH(
 
   try {
     const body = await request.json()
-    const { name, columns } = body
+    const { name } = body
 
-    // Build update object - only include fields that are provided
-    const updateData: { name?: string; columns?: any } = {}
-
-    if (name !== undefined) {
-      if (typeof name !== 'string' || name.trim() === '') {
-        return NextResponse.json(
-          { message: 'Board name must be a non-empty string' },
-          { status: 400 }
-        )
-      }
-      updateData.name = name.trim()
-    }
-
-    if (columns !== undefined) {
-      // Validate columns - can be either:
-      // 1. New format: { configs: ColumnConfig[], deletedIds: string[] }
-      // 2. Old format: ColumnConfig[] (array)
-      if (Array.isArray(columns)) {
-        // Old format - keep as is
-        updateData.columns = columns
-      } else if (typeof columns === 'object' && columns !== null) {
-        // New format - validate structure
-        if ('configs' in columns && Array.isArray(columns.configs)) {
-          updateData.columns = columns
-        } else {
-          return NextResponse.json(
-            { message: 'Columns must be an array or an object with configs array' },
-            { status: 400 }
-          )
-        }
-      } else {
-        return NextResponse.json(
-          { message: 'Columns must be an array or an object with configs array' },
-          { status: 400 }
-        )
-      }
-    }
-
-    // If no valid fields to update, return error
-    if (Object.keys(updateData).length === 0) {
+    // Board PATCH only renames the board. Column changes go through the
+    // /api/columns/* endpoints (board_columns table is the single source of truth).
+    if (typeof name !== 'string' || name.trim() === '') {
       return NextResponse.json(
-        { message: 'No valid fields to update' },
+        { message: 'Board name must be a non-empty string' },
         { status: 400 }
       )
     }
+
+    const updateData = { name: name.trim() }
 
     const { data, error } = await supabaseAdmin
       .from('boards')

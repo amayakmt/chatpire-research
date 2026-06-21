@@ -19,21 +19,27 @@ export interface ColumnConfig {
   columnId?: string // UUID from board_columns table (for API calls)
 }
 
-export interface BoardColumnMetadata {
-  configs: ColumnConfig[] // Column configurations
-  deletedIds: string[] // IDs of columns that have been deleted
+/**
+ * A column as stored in the `board_columns` table — the single source of truth
+ * for column metadata. `id` (UUID) is also the key under which a column's value
+ * is stored in `leads.data`.
+ */
+export interface BoardColumn {
+  id: string // UUID (board_columns.id)
+  board_id?: string
+  name: string // Display name
+  type: string // 'text' | 'ai_enrichment' | 'dropcontact'
+  order: number
+  position?: number
+  config?: ColumnAIConfig & { width?: number; color?: string }
 }
 
 export interface Board {
   id: string
   name: string
-  columns?: ColumnConfig[] // Optional, defaults to empty array
+  /** Columns from the `board_columns` table, ordered by position/order. */
+  columns?: BoardColumn[]
   created_at: string
-  /**
-   * When true, this board uses the new `board_columns` table for column storage.
-   * When false or undefined, it uses the legacy `board.columns` JSONB field.
-   */
-  isNewColumnSystem?: boolean
 }
 
 export interface Lead {

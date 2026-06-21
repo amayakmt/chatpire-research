@@ -50,31 +50,6 @@ interface UseColumnManagerReturn {
   ) => Promise<void>
 }
 
-/**
- * Determine whether the board is using the new board_columns table system.
- *
- * Priority:
- *  1. Explicit flag on the board object (most reliable).
- *  2. Duck-type: board_columns rows have UUID id, name, and type (legacy JSON configs use `header`, not `name`/`type`).
- *  3. Empty columns array → false (cannot determine, assume old system).
- */
-function detectIsNewSystem(board: Board): boolean {
-  if (board.isNewColumnSystem === true) return true
-  if (board.isNewColumnSystem === false) return false
-
-  if (!Array.isArray(board.columns) || board.columns.length === 0) {
-    return false
-  }
-  const first = board.columns[0] as unknown as Record<string, unknown>
-  const id = first['id']
-  return (
-    typeof first['name'] === 'string' &&
-    typeof first['type'] === 'string' &&
-    typeof id === 'string' &&
-    isValidUUID(id)
-  )
-}
-
 /** Validate that a string looks like a UUID (8-4-4-4-12 hex). */
 function isValidUUID(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
@@ -137,11 +112,8 @@ export function useColumnManager({
         setIsSavingColumns(true)
         const headers = getAuthHeaders()
 
-        const isNewSystem = detectIsNewSystem(board)
-
-        if (isNewSystem) {
-          // New system: Update columns in board_columns table
-          const updatePromises = configs.map(async (config) => {
+        // Persist per-column width/order/color to the board_columns table.
+        const updatePromises = configs.map(async (config) => {
             // Find the column by UUID directly, or by name as fallback (backward compatibility)
             const column = Array.isArray(board.columns)
               ? (board.columns as any[]).find(
@@ -219,32 +191,6 @@ export function useColumnManager({
           })
 
           await onBoardUpdate()
-        } else {
-          // Old system: Save to boards.columns JSONB
-          const columnsMetadata = {
-            configs: configs,
-            deletedIds: Array.from(deletedColumnIds),
-          }
-
-          const controller = createController()
-
-          const response = await fetch(`/api/boards/${board.id}`, {
-            method: 'PATCH',
-            headers,
-            signal: controller.signal,
-            body: JSON.stringify({ columns: columnsMetadata }),
-          })
-
-          if (!response.ok) {
-            const errorText = await response.text()
-            console.error('Save failed with status:', response.status)
-            console.error('Error response:', errorText)
-            throw new Error('Failed to save column configuration')
-          }
-
-          // Response consumed — board update handled by parent component
-          await response.json()
-        }
       } catch (error) {
         if (error instanceof Error && error.name === 'AbortError') return
         console.error('Error saving column config:', error)
@@ -254,17 +200,12 @@ export function useColumnManager({
         setHasPendingChanges(false)
       }
     },
-    [board, isSavingColumns, deletedColumnIds, onBoardUpdate]
+    [board, isSavingColumns, onBoardUpdate]
   )
 
   const persistColumnOrder = useCallback(
     async (orderedConfigs: ColumnConfig[]) => {
       if (!board) return
-
-      if (!detectIsNewSystem(board)) {
-        await saveColumnConfig(orderedConfigs)
-        return
-      }
 
       const orderedColumnIds = orderedConfigs.map((c) => c.id).filter(isValidUUID)
       if (orderedColumnIds.length === 0) return
@@ -333,11 +274,9 @@ export function useColumnManager({
 
       try {
         const headers = getAuthHeaders()
-        const isNewSystem = detectIsNewSystem(board)
 
-        if (isNewSystem) {
-          // Find the column by UUID
-          const column = Array.isArray(board.columns)
+        // Find the column by UUID
+        const column = Array.isArray(board.columns)
             ? (board.columns as any[]).find(
                 (col: Record<string, unknown>) => col['id'] === columnId
               )
@@ -378,8 +317,7 @@ export function useColumnManager({
             throw new Error('Failed to rename column')
           }
 
-          await onBoardUpdate()
-        }
+        await onBoardUpdate()
 
         // Optimistically update local state
         const updatedConfigs = columnConfigs.map((config) => {

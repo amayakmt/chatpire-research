@@ -2,9 +2,7 @@
 
 An AI-powered B2B lead enrichment platform — import CSVs, enrich rows with LLM-generated columns using reusable prompts, and work with large prospect datasets in a spreadsheet-style UI.
 
-**Live demo:** `LIVE_DEMO_URL` — *coming soon; replace with your Vercel (or other) production URL after deploy.*
-
-<!-- TODO: Add screenshot.png to repo root and verify image displays on GitHub -->
+**Live demo:** coming soon.
 
 ## What it does
 
@@ -63,7 +61,18 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## Database setup
 
-The app expects Supabase tables including **`boards`**, **`board_columns`**, **`leads`**, and **`prompt_templates`**, plus RPCs used for column lifecycle (see the reference doc). **Full `CREATE TABLE` statements and API notes** are in [**docs/TECHNICAL_REFERENCE.md**](docs/TECHNICAL_REFERENCE.md). For migrating legacy name-based JSON keys to column UUIDs, see **`MIGRATION_UUID_KEYS.sql`** at the repo root.
+The app expects Supabase tables including **`boards`**, **`board_columns`**, **`leads`**, and **`prompt_templates`**, plus RPCs used for column lifecycle. **Full `CREATE TABLE` statements and API notes** are in [**docs/TECHNICAL_REFERENCE.md**](docs/TECHNICAL_REFERENCE.md). Two SQL helpers live at the repo root:
+
+- **`SQL_BULK_REMOVE_COLUMN_KEYS.sql`** — RPC functions used by the column-delete endpoint to strip a deleted column's keys out of `leads.data`. Run once after creating the tables.
+- **`MIGRATION_UUID_KEYS.sql`** — one-off migration of legacy name-based JSON keys to column UUIDs.
+
+## Scope & limitations
+
+This is a **portfolio / single-user demo**, not a hardened multi-tenant product. A few deliberate trade-offs worth knowing:
+
+- **No authentication.** Server API routes use the Supabase **service-role key**, which **bypasses Row Level Security**. There is no user/tenant model, so all data is shared. Before any real deployment you'd add auth and per-user RLS policies (see [docs/TECHNICAL_REFERENCE.md](docs/TECHNICAL_REFERENCE.md) → *Row Level Security*).
+- **In-memory rate limiting.** `lib/rateLimit.ts` is per-instance and resets on restart; a multi-instance deploy would need a shared store (e.g. Redis).
+- **Demo mode.** Set `NEXT_PUBLIC_DEMO_MODE=true` to cap enrichment to Gemini 2.5 Flash Lite and 10 rows per run.
 
 ## License
 

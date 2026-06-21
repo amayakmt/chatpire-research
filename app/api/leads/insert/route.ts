@@ -44,7 +44,10 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Verify the requesting user owns this board (RLS-scoped supabaseAdmin)
+    // Ensure the target board exists before inserting leads into it.
+    // NOTE: There is no auth layer in this app — `supabaseAdmin` uses the
+    // service-role key and bypasses RLS, so this is an existence check, NOT a
+    // per-user ownership check (see README "Scope & limitations").
     const { data: board, error: boardError } = await supabaseAdmin
       .from('boards')
       .select('id')

@@ -134,48 +134,6 @@ async function fetchAllLeadIdsForBoard(
 }
 
 
-// Generate initial column config from data
-function generateInitialColumnConfig(leads: Lead[]): ColumnConfig[] {
-  if (leads.length === 0) return []
-
-  const sampleSize = Math.min(50, leads.length)
-  const sampleRows = leads.slice(0, sampleSize)
-  const allKeys = new Set<string>()
-
-  sampleRows.forEach((lead) => {
-    if (lead.data && typeof lead.data === 'object') {
-      Object.keys(lead.data).forEach((key) => allKeys.add(key))
-    }
-  })
-
-  const sortedKeys = Array.from(allKeys).sort()
-
-  return sortedKeys.map((key, index) => {
-    const sampleValues = sampleRows
-      .map((lead) => {
-        const value = lead.data?.[key]
-        return value ? String(value) : ''
-      })
-      .filter((v) => v.length > 0)
-
-    const maxLength = Math.max(
-      key.length,
-      ...sampleValues.map((v) => v.length)
-    )
-
-    const estimatedWidth = Math.min(Math.max(maxLength * 8 + 40, 120), 400)
-
-            return {
-              id: key,
-              header: key, // Use exact key, no formatting
-              width: estimatedWidth,
-              order: index,
-              visible: true, // Keep for backward compatibility, but not used
-            }
-  })
-}
-
-
 // Editable cell component
 function EditableCell({
   initialValue,
@@ -310,7 +268,6 @@ export default function BoardPage({ params }: BoardPageProps) {
   const {
     columnConfigs,
     setColumnConfigs,
-    deletedColumnIds,
     isSavingColumns,
     hasInitialized,
     setHasInitialized,
@@ -502,53 +459,31 @@ export default function BoardPage({ params }: BoardPageProps) {
     })
   )
 
-  // Initialize column configs from board data
+  // Initialize column configs from the board_columns table (single source of truth)
   useEffect(() => {
     if (!board || hasInitialized) return
-    
-    // Load columns from board_columns table (new format)
+
     if (Array.isArray(board.columns) && board.columns.length > 0) {
-      // Columns from board_columns table - use UUIDs as IDs
-      // CRITICAL: Sort by order to ensure UI reflects database reality
+      // Sort by order so the UI reflects the persisted column order.
       const sortedConfigs = board.columns
-        .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
-        .map((col: any) => ({
-          id: col.id, // CRITICAL: Use UUID as id (not name) for UUID-based data access
-          header: col.name, // Use column name as display header
+        .slice()
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+        .map((col) => ({
+          id: col.id, // UUID — also the key under which values live in lead.data
+          header: col.name, // Column name is the display header
           width: col.config?.width || 200,
-          order: col.order ?? 0, // Ensure order is always a number
+          order: col.order ?? 0,
           type: col.type || 'text',
           visible: true,
           color: col.config?.color,
-          columnId: col.id, // Store the UUID for API calls (same as id now)
-          config: col.config || {}, // Store the full config object (includes prompt, model, etc.)
+          columnId: col.id, // Same as id; kept for API-call call sites
+          config: col.config || {}, // Full config (prompt, model, etc.)
         }))
       setColumnConfigs(sortedConfigs)
-      setHasInitialized(true)
-    } else if (board.columns) {
-      // Legacy format - check if it's the old format (with metadata) or old format (just array)
-      if (typeof board.columns === 'object' && 'configs' in board.columns && Array.isArray((board.columns as any).configs)) {
-        // Old format with metadata - convert to use exact names
-        const sortedConfigs = [...((board.columns as any).configs as ColumnConfig[])]
-          .sort((a, b) => a.order - b.order)
-          .map((config) => ({
-            ...config,
-            header: config.id, // Use ID as header (exact name)
-          }))
-        setColumnConfigs(sortedConfigs)
-        setHasInitialized(true)
-      } else if (Array.isArray(board.columns) && board.columns.length > 0) {
-        // Old format (just array) - convert to use exact names
-        const sortedConfigs = [...board.columns]
-          .sort((a, b) => a.order - b.order)
-          .map((config) => ({
-            ...config,
-            header: config.id, // Use ID as header (exact name)
-          }))
-        setColumnConfigs(sortedConfigs)
-        setHasInitialized(true)
-      }
     }
+
+    // Mark initialized even for an empty board so the grid leaves its loading state.
+    setHasInitialized(true)
   }, [board, hasInitialized, setColumnConfigs, setHasInitialized])
 
   // Cleanup polling on unmount
@@ -568,130 +503,14 @@ export default function BoardPage({ params }: BoardPageProps) {
   }, [])
 
 
-  // Generate initial column config if none exists (only if no saved configs)
+  // Sync columnConfigs from board.columns (board_columns table is the source of truth).
+  // This ensures columns created/updated in the database appear in the frontend.
   useEffect(() => {
-    // Skip if columns are already loaded (from fetchBoard) - prevents duplicates
-    if (columnConfigs.length > 0) {
-      if (!hasInitialized) {
-        setHasInitialized(true)
-      }
-      return
-    }
-    
-    // Only run if we have both board and leads loaded, haven't initialized
-    if (leads.length > 0 && board && !hasInitialized) {
-      // Check if columns are from board_columns table (new system)
-      const isNewSystem = Array.isArray(board.columns) && 
-                         board.columns.length > 0 && 
-                         board.columns[0]?.hasOwnProperty('name') && 
-                         board.columns[0]?.hasOwnProperty('type')
-      
-      if (isNewSystem) {
-        // New system: columns from board_columns table
-        // These should already be loaded in fetchBoard, but ensure they're set
-        const sortedConfigs = (board.columns as any[])
-          .sort((a: any, b: any) => (a.order || 0) - (b.order || 0))
-          .map((col: any) => ({
-            id: col.name,
-            header: col.name,
-            width: col.config?.width || 200,
-            order: col.order || 0,
-            type: col.type || 'text',
-            visible: true,
-            color: col.config?.color,
-          }))
-        setColumnConfigs(sortedConfigs)
-        setHasInitialized(true)
-        return // Don't run old system logic
-      }
-      
-      // Old system: Check if board has saved columns
-      let hasSavedColumns = false
-      if (board.columns) {
-        if (typeof board.columns === 'object' && 'configs' in board.columns) {
-          // Old format with metadata
-          hasSavedColumns = Array.isArray(board.columns.configs) && board.columns.configs.length > 0
-        } else if (Array.isArray(board.columns)) {
-          // Old format (just array) - but check if it's actually new system
-          // New system columns have 'name' and 'type', old system has 'id' and 'header'
-          const isActuallyNewSystem = board.columns.length > 0 && 
-                                     board.columns[0]?.hasOwnProperty('name') && 
-                                     board.columns[0]?.hasOwnProperty('type')
-          if (!isActuallyNewSystem) {
-            hasSavedColumns = board.columns.length > 0
-          }
-        }
-      }
-      
-      if (!hasSavedColumns && columnConfigs.length === 0) {
-        // No saved columns and no configs in state - generate initial config (old system only)
-        const initialConfig = generateInitialColumnConfig(leads)
-        if (initialConfig.length > 0) {
-          setColumnConfigs(initialConfig)
-          setHasInitialized(true)
-          saveColumnConfig(initialConfig)
-        }
-      } else if (hasSavedColumns && columnConfigs.length === 0) {
-        // Board has saved columns but state hasn't been set yet - set them
-        // Check if it's new format (with metadata) or old format
-        if (board.columns && typeof board.columns === 'object' && 'configs' in board.columns) {
-          // New format
-          const metadata = board.columns as any
-          // Sort by order to ensure correct display order
-          const sortedConfigs = [...(metadata.configs || [])].sort((a: ColumnConfig, b: ColumnConfig) => a.order - b.order)
-          setColumnConfigs(sortedConfigs)
-          if (metadata.deletedIds && Array.isArray(metadata.deletedIds)) {
-            // deletedColumnIds is managed by useColumnManager hook
-          }
-        } else if (Array.isArray(board.columns)) {
-          // Old format - migrate it
-          // Sort by order to ensure correct display order
-          const sortedConfigs = [...board.columns].sort((a: ColumnConfig, b: ColumnConfig) => a.order - b.order)
-          setColumnConfigs(sortedConfigs)
-          
-          // Identify deleted columns: keys in data that aren't in saved configs
-          const allKeys = new Set<string>()
-          leads.forEach((lead) => {
-            if (lead.data && typeof lead.data === 'object') {
-              Object.keys(lead.data).forEach((key) => allKeys.add(key))
-            }
-          })
-          const savedColumnIds = new Set(board.columns.map((c: ColumnConfig) => c.id))
-          const deletedKeys = Array.from(allKeys).filter((key) => !savedColumnIds.has(key))
-          if (deletedKeys.length > 0) {
-            // deletedColumnIds is managed by useColumnManager hook
-            // Migrate to new format immediately
-            const columnsMetadata = {
-              configs: board.columns,
-              deletedIds: deletedKeys,
-            }
-            saveColumnConfig(board.columns) // This will save in new format
-          }
-        }
-        
-        setHasInitialized(true)
-      }
-    }
-  }, [leads, board, hasInitialized, columnConfigs.length, saveColumnConfig])
-
-  // Sync columns from board.columns (for NEW system - board_columns table)
-  // This ensures new columns created in the database appear in the frontend
-  useEffect(() => {
-    if (!board || !hasInitialized || !Array.isArray(board.columns)) {
+    if (!board || !hasInitialized || !Array.isArray(board.columns) || board.columns.length === 0) {
       return
     }
 
-    // Check if using new board_columns system
-    const isNewSystem = board.columns.length > 0 && 
-                       board.columns[0]?.hasOwnProperty('name') && 
-                       board.columns[0]?.hasOwnProperty('type')
-    
-    if (!isNewSystem) {
-      return // Old system handled separately below
-    }
-
-    // NEW SYSTEM: Sync columnConfigs from board.columns (API is source of truth)
-    // Iterate over API columns (source of truth) and merge with existing state
+    // Merge API columns (source of truth) with existing local state.
     const mergedConfigs = board.columns.map((apiCol: any) => {
       // Find existing config in state
       const existingConfig = columnConfigs.find(
@@ -775,86 +594,6 @@ export default function BoardPage({ params }: BoardPageProps) {
       setColumnConfigs(sortedConfigs)
     }
   }, [board?.columns, hasInitialized]) // Use board.columns directly, not columnConfigs to avoid loops
-
-  // Sync new columns when data changes (only after initialization)
-  // IMPORTANT: Only run this for the OLD system (boards.columns JSONB)
-  // For the NEW system (board_columns table), columns are managed via API
-  useEffect(() => {
-    if (leads.length > 0 && board && hasInitialized && columnConfigs.length > 0) {
-      // Check if using new board_columns system
-      // New system: board.columns is an array of objects with 'name' and 'type' properties
-      const isNewSystem = Array.isArray(board.columns) && 
-                         board.columns.length > 0 && 
-                         board.columns[0]?.hasOwnProperty('name') && 
-                         board.columns[0]?.hasOwnProperty('type')
-      
-      if (isNewSystem) {
-        // New system - columns are managed in board_columns table
-        // Don't auto-generate columns from leads data to avoid duplicates
-        // Only create columns via API when explicitly needed
-        return
-      }
-
-      // Old system only: Get all unique keys from leads data
-      const allKeys = new Set<string>()
-      leads.forEach((lead) => {
-        if (lead.data && typeof lead.data === 'object') {
-          Object.keys(lead.data).forEach((key) => {
-            if (key && key.trim() && key !== '__index') {
-              allKeys.add(key)
-            }
-          })
-        }
-      })
-
-      // Check for new columns and add them (but exclude deleted columns)
-      const existingIds = new Set(columnConfigs.map((c) => c.id))
-      
-      const newKeys = Array.from(allKeys).filter((key) => {
-        // Exclude if already in configs
-        if (existingIds.has(key)) {
-          return false
-        }
-        // Exclude if in deleted list
-        if (deletedColumnIds.has(key)) {
-          return false
-        }
-        return true
-      })
-
-      if (newKeys.length > 0) {
-        // Add new columns to the end (old system only)
-        const maxOrder = Math.max(...columnConfigs.map((c) => c.order), -1)
-        const newConfigs = newKeys.map((key, index) => {
-          const sampleValues = leads.slice(0, 50)
-            .map((lead) => {
-              const value = lead.data?.[key]
-              return value ? String(value) : ''
-            })
-            .filter((v) => v.length > 0)
-
-          const maxLength = Math.max(
-            key.length,
-            ...sampleValues.map((v) => v.length)
-          )
-
-          const estimatedWidth = Math.min(Math.max(maxLength * 8 + 40, 120), 400)
-
-          return {
-            id: key,
-            header: key, // Use exact key, no formatting
-            width: estimatedWidth,
-            order: maxOrder + 1 + index,
-            visible: true, // Keep for backward compatibility, but not used
-          }
-        })
-
-        const updatedConfigs = [...columnConfigs, ...newConfigs]
-        setColumnConfigs(updatedConfigs)
-        saveColumnConfig(updatedConfigs)
-      }
-    }
-  }, [leads, board, hasInitialized, columnConfigs, saveColumnConfig, deletedColumnIds])
 
   // Generate columns from config
   const columns = useMemo<ColumnDef<Lead>[]>(() => {
@@ -1350,37 +1089,15 @@ export default function BoardPage({ params }: BoardPageProps) {
   // Handle opening rename dialog
   const handleOpenRenameDialog = (columnConfig: ColumnConfig) => {
     if (!board) return
-    
-    // Find the column UUID from board.columns
-    const isNewSystem = Array.isArray(board.columns) && 
-                       board.columns.length > 0 && 
-                       board.columns[0]?.hasOwnProperty('name') && 
-                       board.columns[0]?.hasOwnProperty('type')
-    
-    if (isNewSystem) {
-      const column = Array.isArray(board.columns) 
-        ? (board.columns as any[]).find((col: any) => col.name === columnConfig.id || col.id === columnConfig.id)
-        : null
-      
-      if (column) {
-        setColumnToRename({
-          id: column.id,
-          name: columnConfig.header || columnConfig.id,
-          columnId: columnConfig.id,
-        })
-        setRenameValue(columnConfig.header || columnConfig.id)
-        setIsRenameDialogOpen(true)
-      }
-    } else {
-      // Old system - use the config id directly
-      setColumnToRename({
-        id: columnConfig.id,
-        name: columnConfig.header || columnConfig.id,
-        columnId: columnConfig.id,
-      })
-      setRenameValue(columnConfig.header || columnConfig.id)
-      setIsRenameDialogOpen(true)
-    }
+
+    // columnConfig.id is the board_columns UUID (set during column init).
+    setColumnToRename({
+      id: columnConfig.id,
+      name: columnConfig.header || columnConfig.id,
+      columnId: columnConfig.id,
+    })
+    setRenameValue(columnConfig.header || columnConfig.id)
+    setIsRenameDialogOpen(true)
   }
 
   // Handle saving rename

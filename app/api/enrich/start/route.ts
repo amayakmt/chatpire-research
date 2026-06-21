@@ -2,8 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
 import { GoogleGenAI } from '@google/genai'
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit'
-import { extractTextFromAny } from '../lib/extractText'
-import { replaceVariables, extractVariables } from '../lib/buildMessages'
+import { buildGeminiMessages, buildSinglePromptHistory, extractVariables, type GeminiChatTurn } from '../lib/buildMessages'
 import { resolveModel, DEFAULT_MODEL, type ThinkingLevel } from '../lib/geminiClient'
 import { isDemoMode, DEMO_MODEL_ID, DEMO_MAX_ROWS } from '@/lib/demoMode'
 
@@ -96,38 +95,22 @@ async function processLead(
     // Resolve model name (handles deprecated 3.0 → 3.1 migration)
     const modelName = resolveModel(config.model)
 
-    // Process messages array (new format) or single prompt (old format)
+    // Process messages array (new format) or single prompt (old format).
+    // Both paths go through the shared builders so that variable substitution
+    // AND prompt-injection protection (lead-data values are fenced as data,
+    // not instructions — see buildMessages.ts) are applied consistently.
     let systemInstruction = config.systemInstruction || ''
-    let chatHistory: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = []
-    
+    let chatHistory: GeminiChatTurn[]
+
     if (messages && Array.isArray(messages) && messages.length > 0) {
       // New format: messages array
-      // Extract and combine system messages
-      const systemMessages = messages
-        .filter(m => m.role === 'system')
-        .map(m => replaceVariables(m.content, lead.data, columns)) // Apply variable replacement with column mapping
-      
-      systemInstruction = systemMessages.join('\n\n')
-      
-      // Filter and format user/assistant messages for chat history
-      const chatMessages = messages.filter(m => m.role === 'user' || m.role === 'assistant')
-      
-      chatHistory = chatMessages.map((msg) => {
-        // Apply variable replacement to all message contents with column mapping
-        const enrichedContent = replaceVariables(msg.content, lead.data, columns)
-        
-        // Map 'assistant' role to 'model' (Gemini API uses 'model' not 'assistant')
-        return {
-          role: msg.role === 'assistant' ? 'model' : 'user',
-          parts: [{ text: enrichedContent }],
-        }
-      })
-      
-      console.log(`💬 Using ${chatHistory.length} messages for chat (${systemMessages.length} system messages)`)
+      const built = buildGeminiMessages(messages, lead.data, columns)
+      systemInstruction = built.systemInstruction
+      chatHistory = built.chatHistory
+      console.log(`💬 Using ${chatHistory.length} messages for chat`)
     } else if (prompt) {
       // Old format: single prompt string (backward compatibility)
-      const enrichedPrompt = replaceVariables(prompt, lead.data, columns)
-      chatHistory = [{ role: 'user' as const, parts: [{ text: enrichedPrompt }] }]
+      chatHistory = buildSinglePromptHistory(prompt, lead.data, columns)
       console.log(`📝 Using single prompt (backward compatibility)`)
     } else {
       throw new Error('No messages or prompt provided')
